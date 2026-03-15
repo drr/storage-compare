@@ -1,4 +1,5 @@
 data/
 results/
+cold-results.txt
 *.db
 node_modules/

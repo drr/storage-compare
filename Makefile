@@ -2,10 +2,11 @@
         bench-cold bench-warm bench-go bench-node bench-all \
         results clean-data clean check-go verify
 
-DATA_DIR    ?= ./data
-RESULTS_DIR ?= ./results
-COUNT       ?= 10000
-SEED        ?= 0
+DATA_DIR     ?= ./data
+RESULTS_DIR  ?= ./results
+COLD_OUT     ?= ./cold-results.txt
+COUNT        ?= 10000
+SEED         ?= 0
 
 GO_BIN      := $(shell command -v go 2>/dev/null)
 GO_GENERATE := $(DATA_DIR)/.generate.stamp
@@ -63,12 +64,14 @@ generate-append: check-go
 # ─── Benchmarks ──────────────────────────────────────────────────────────────
 
 bench-cold:
+	@rm -f $(COLD_OUT)
 	@echo "==> Purging OS buffer cache for Go run..."
 	sudo purge
-	@$(MAKE) bench-go
+	@$(MAKE) bench-go 2>&1 | tee -a $(COLD_OUT)
 	@echo "==> Purging OS buffer cache for Node run..."
 	sudo purge
-	@$(MAKE) bench-node
+	@$(MAKE) bench-node 2>&1 | tee -a $(COLD_OUT)
+	@echo "==> Cold results written to $(COLD_OUT)"
 
 bench-warm: bench-all
 
@@ -113,4 +116,4 @@ clean-data:
 	rm -rf $(DATA_DIR)/sqlite $(DATA_DIR)/fs $(DATA_DIR)/index.json $(GO_GENERATE)
 
 clean: clean-data
-	rm -rf $(RESULTS_DIR)
+	rm -rf $(RESULTS_DIR) $(COLD_OUT)

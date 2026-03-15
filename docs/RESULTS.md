@@ -295,6 +295,22 @@ filesystem | create_version      |  1000 |  5.3%! |  0.10ms |  0.37ms |  0.81ms 
 
 The one exception is **Node SQLite `read_random`**: 0.01ms warm → 0.77ms cold. This reflects `better-sqlite3`'s in-process SQLite page cache, which is application heap memory and survives the OS buffer cache state but is reset when the process starts. In the warm run, the benchmark process makes 1500 sequential random reads, and the SQLite page cache accumulates the most-recently-accessed B-tree pages in memory — enough that the median re-access is a cache hit. After `sudo purge`, the process starts fresh with an empty page cache and all 1500 reads are cold page faults, driving the median to 0.77ms. Go warm showed 0.55ms because `go-sqlite3`'s default page cache is smaller and saturates faster under random access across 1M rows.
 
+### Day-Scan Per-Entry Cost vs Single Random Read
+
+The per-entry normalization reveals a fundamental difference in how the two backends handle range queries vs point lookups:
+
+| | SQLite Go | SQLite Node | FS Go | FS Node |
+|---|---|---|---|---|
+| `read_random` (1M cold) | 0.61ms | 0.77ms | 0.27ms | 0.26ms |
+| `read_day_per_entry` (1M cold) | 0.01ms | 0.01ms | 0.16ms | 0.18ms |
+| **ratio** | **61×** | **77×** | **1.7×** | **1.4×** |
+
+**SQLite: entries inside a day scan are 60–77× cheaper per entry than a standalone random read.** `read_day` pays the O(log N) B-tree traversal cost once to land at the start of the day's index range, then reads sequentially through spatially-adjacent pages. After the first page fault, subsequent entries in that day are on already-loaded pages — each one costs almost nothing incremental. A standalone `read_random` starts a fresh traversal from scratch each time, landing on a different cold page at 1M scale.
+
+**Filesystem: entries inside a day scan are only ~1.5× cheaper than a standalone read.** There is no amortization. Each file is an independent inode, a separate `open()`, and a separate page fault regardless of whether you got there via `readdir` or a direct path. The sole amortized cost is the single `readdir` call, which is a small fraction of the total. The per-entry cost in a day scan is structurally identical to a random read.
+
+This is the deepest structural difference between the two backends: SQLite transforms a range query into a sequential scan, making each additional entry nearly free. The filesystem makes every entry an independent I/O unit regardless of access pattern.
+
 **`read_day` at 1M is structurally cold at all cache temperatures.** Each call fetches ~1370 rows of content. No realistic in-process cache can hold 1370 × avg-content-size across a working set of 1M entries, so every `read_day` call pulls from storage regardless of warm/cold state. Warm and cold medians are within noise (15ms vs 17ms Go, 12ms vs 12ms Node).
 
 **`read_day_per_entry` is stable across all conditions: 0.01ms/entry for SQLite, ~0.17ms/entry for filesystem.** The per-entry cost is a fixed property of the storage access pattern, not the cache state — confirming the 1M degradation is structural, not thermal.
