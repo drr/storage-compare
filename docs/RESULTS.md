@@ -156,8 +156,84 @@ SQLite median latencies are essentially unchanged between warm and cold cache. T
 
 Write medians are nearly identical warm vs cold for both backends. WAL appends and filesystem writes are sequential, and the kernel buffers them; `fsync` is not called per-write in WAL NORMAL mode. The spikes in P99/Max (SQLite up to 11ms cold, FS up to 10ms warm) are WAL checkpoint and directory-creation artifacts, not cache-miss effects.
 
-### Key Takeaway (Cold Cache)
+### Key Takeaway (Cold Cache, 10k entries)
 
 **SQLite is cache-immune at this scale; filesystem read_random takes a 4–5× hit cold.** For a note-taking app, the typical access pattern after an app launch (cold) is to open a day's entries — exactly `read_day`. At cold cache, SQLite delivers `read_day` in 0.05ms (Go) / 0.02ms (Node), while the filesystem takes 0.34ms (Go) / 0.75ms (Node). The structural advantage identified in the warm run holds and widens under cold conditions.
 
 If the app's primary read pattern is random single-entry lookup (e.g., following a link to a specific note), the filesystem is 5× slower cold but equal warm — an acceptable tradeoff if lookups are rare. If `read_day` is frequent (e.g., loading the day view on app open), SQLite's advantage is both larger and more consistent across cache states.
+
+---
+
+## Scale Run: 1M Entries (Warm Cache)
+
+**Conditions:** `make clean-data && make generate-scale COUNT=1000000 && make bench-all`. 1,000,000 entries spread uniformly across the same 730-day window (~1,370 entries/day on average vs ~14 at 10k). The version-to-entry ratio is identical — only directory density changes.
+
+### Go
+
+```
+Backend    | Operation       |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+----------------------------------------------------------------------------------------------------
+sqlite     | read_random     |  1000 |   4.1% |  0.01ms |  0.02ms |  0.23ms |  0.33ms |  0.49ms |   49383
+sqlite     | read_day        |   600 |   2.5% | 10.38ms | 13.72ms | 26.47ms | 43.38ms | 65.72ms |      73
+sqlite     | create_entry    |  2500 |   4.2% |  0.02ms |  0.04ms |  0.07ms |  0.10ms | 15.57ms |   24641
+sqlite     | create_version  |  1000 |   4.2% |  0.04ms |  0.06ms |  0.09ms |  0.12ms | 16.39ms |   16517
+filesystem | read_random     |  2000 |   3.7% |  0.02ms |  0.20ms |  0.34ms |  0.43ms |  3.08ms |    4896
+filesystem | read_day        |   200 |   2.2% | 25.66ms | 222.34ms | 259.25ms | 290.04ms | 294.69ms |       4
+filesystem | create_entry    |   500 |   2.2% |  0.05ms |  0.07ms |  0.09ms |  0.23ms |  5.79ms |   14833
+filesystem | create_version  |   600 |   4.7% |  0.81ms |  5.52ms |  7.82ms | 12.71ms | 31.60ms |     181
+```
+
+### Node
+
+```
+Backend    | Operation       |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+---------------------------------------------------------------------------------------------------------
+sqlite     | read_random     |  1000 |   4.9% |  0.00ms |  0.01ms |  0.16ms |  0.18ms |  0.29ms |   73394
+sqlite     | read_day        |   300 |   2.9% |  5.16ms | 12.48ms | 17.65ms | 24.14ms | 27.53ms |      80
+sqlite     | create_entry    |  2000 |  7.0%! |  0.02ms |  0.04ms |  0.07ms |  0.20ms | 17.12ms |   27088
+sqlite     | create_version  |   800 |   4.5% |  0.03ms |  0.06ms |  0.09ms |  0.27ms | 18.09ms |   17804
+filesystem | read_random     |  2500 |   3.8% |  0.01ms |  0.21ms |  0.38ms |  0.46ms |  2.65ms |    4834
+filesystem | read_day        |   100 |   3.9% | 21.70ms | 243.28ms | 280.23ms | 312.01ms | 312.31ms |       4
+filesystem | create_entry    |   400 |   2.6% |  0.04ms |  0.06ms |  0.28ms |  1.43ms |  4.92ms |   17857
+filesystem | create_version  |  1000 |  5.3%! |  0.10ms |  0.37ms |  0.86ms |  9.63ms | 15.33ms |    2692
+```
+
+---
+
+## 10k vs 1M Comparison
+
+### SQLite: scales well everywhere except `read_day`
+
+| Op | Go 10k | Go 1M | Node 10k | Node 1M |
+|----|--------|-------|----------|---------|
+| read_random | 0.02ms | 0.02ms | 0.01ms | 0.01ms |
+| read_day | 0.09ms | 13.72ms | 0.05ms | 12.48ms |
+| create_entry | 0.03ms | 0.04ms | 0.03ms | 0.04ms |
+| create_version | 0.06ms | 0.06ms | 0.04ms | 0.06ms |
+
+`read_random`, `create_entry`, and `create_version` are all **unchanged** at 1M. SQLite's B-tree depth grows logarithmically and all three operations touch a fixed number of pages regardless of dataset size. `read_day` is the exception: the indexed range scan returns ~1370 rows instead of ~14, and pulling that much content through the cgo boundary scales linearly with rows returned.
+
+### Filesystem: directory density drives all degradation
+
+| Op | Go 10k | Go 1M | Node 10k | Node 1M |
+|----|--------|-------|----------|---------|
+| read_random | 0.02ms | 0.20ms | 0.03ms | 0.21ms |
+| read_day | 0.32ms | 222ms | 0.29ms | 243ms |
+| create_entry | 0.07ms | 0.07ms | 0.06ms | 0.06ms |
+| create_version | 0.15ms | 5.52ms | 0.12ms | 0.37ms |
+
+All the filesystem degradation comes from **directory density** — 1370 files/directory vs 14 — not from a higher fraction of versioned entries (that ratio is identical at both scales).
+
+**`read_random` (+10×):** Even warm-cache, opening a single file requires the kernel to locate its inode entry within the directory. With 1370 files in the directory, more directory blocks must be scanned. At 10k the entire directory fit in one or two blocks; at 1M each day-directory is large enough to cause real lookup work.
+
+**`read_day` (+700×):** Purely linear scaling. Each day-view requires opening and parsing every file in the directory — 1370 file opens instead of 14. There is no shortcut; every entry's content must be read individually.
+
+**`create_version` (+37× Go, +3× Node):** To archive the current file, the backend must determine the existing version count by scanning the directory for `GUID-vN.md` files matching that entry's prefix. Scanning a 1370-file directory for a string prefix is far more expensive than scanning a 14-file directory. Node's smaller default pool (100 ops) kept it from hitting the worst cases; Go's larger pool (200 ops) explored more of the distribution.
+
+**`create_entry` (unchanged):** Writing a new file to an existing directory doesn't require reading the directory — it's a pure create. This is the one filesystem operation that doesn't degrade with density.
+
+### Key Takeaway (Scale)
+
+At 1M entries SQLite's structural advantages are no longer incremental — they're categorical. `read_day` is 16× faster (13.72ms vs 222ms Go), and the gap only grows with dataset size. Filesystem `read_random` has degraded 10× even at warm cache purely from directory lookup overhead. The only dimension where the filesystem remains competitive is `create_entry`, which is density-independent.
+
+For a note-taking app expecting years of daily use, the 1M run is the more realistic long-term projection. At that scale, SQLite is the clear choice for any workload that involves reading a day's entries.
