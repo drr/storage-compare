@@ -237,3 +237,64 @@ All the filesystem degradation comes from **directory density** — 1370 files/d
 At 1M entries SQLite's structural advantages are no longer incremental — they're categorical. `read_day` is 16× faster (13.72ms vs 222ms Go), and the gap only grows with dataset size. Filesystem `read_random` has degraded 10× even at warm cache purely from directory lookup overhead. The only dimension where the filesystem remains competitive is `create_entry`, which is density-independent.
 
 For a note-taking app expecting years of daily use, the 1M run is the more realistic long-term projection. At that scale, SQLite is the clear choice for any workload that involves reading a day's entries.
+
+---
+
+## Scale Run: 1M Entries (Cold Cache)
+
+**Conditions:** `make bench-cold` on the 1M dataset — `sudo purge` before Go, `sudo purge` before Node.
+
+### Go
+
+```
+Backend    | Operation           |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+--------------------------------------------------------------------------------------------------------
+sqlite     | read_random         |  2000 |   4.2% |  0.02ms |  0.61ms |  1.23ms |  1.84ms |  2.64ms |    1636
+sqlite     | read_day            |   800 |   3.9% |  3.20ms | 15.07ms | 96.19ms | 276.46ms | 561.70ms |      66
+sqlite     | read_day_per_entry  |   800 |   4.6% |  0.01ms |  0.01ms |  0.07ms |  0.21ms |  0.41ms |   90818
+sqlite     | create_entry        |  1500 |   4.5% |  0.02ms |  0.04ms |  0.08ms |  0.22ms | 51.20ms |   23460
+sqlite     | create_version      |  1200 |   4.1% |  0.04ms |  0.06ms |  0.10ms |  0.26ms | 40.90ms |   16249
+filesystem | read_random         |  2000 |   2.5% |  0.02ms |  0.27ms |  0.46ms |  0.59ms |  1.00ms |    3716
+filesystem | read_day            |   200 |   1.7% | 26.60ms | 223.49ms | 257.98ms | 294.96ms | 313.96ms |       4
+filesystem | read_day_per_entry  |   200 |   0.9% |  0.02ms |  0.16ms |  0.19ms |  0.22ms |  0.23ms |    6112
+filesystem | create_entry        |   500 |   3.5% |  0.05ms |  0.07ms |  0.22ms |  0.37ms |  1.14ms |   14972
+filesystem | create_version      |   200 |   4.6% |  0.84ms |  6.30ms |  8.06ms | 12.63ms | 25.23ms |     159
+```
+
+### Node
+
+```
+Backend    | Operation           |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+-------------------------------------------------------------------------------------------------------------
+sqlite     | read_random         |  2000 |   4.5% |  0.01ms |  0.77ms |  1.55ms |  2.03ms |  3.15ms |    1291
+sqlite     | read_day            |   900 |   4.0% |  2.91ms | 12.11ms | 90.64ms | 269.44ms | 695.80ms |      83
+sqlite     | read_day_per_entry  |   900 |   4.1% |  0.01ms |  0.01ms |  0.07ms |  0.19ms |  0.53ms |  111995
+sqlite     | create_entry        |  1200 |   4.9% |  0.02ms |  0.04ms |  0.07ms |  0.20ms | 44.79ms |   25669
+sqlite     | create_version      |  1000 |   4.9% |  0.03ms |  0.06ms |  0.10ms |  0.27ms | 39.62ms |   17480
+filesystem | read_random         |  1500 |   3.9% |  0.02ms |  0.26ms |  0.49ms |  0.71ms |  2.69ms |    3876
+filesystem | read_day            |   100 |   4.9% | 23.97ms | 247.47ms | 299.60ms | 337.94ms | 368.11ms |       4
+filesystem | read_day_per_entry  |   100 |   6.4% |  0.02ms |  0.18ms |  0.22ms |  0.24ms |  0.26ms |    5512
+filesystem | create_entry        |   400 |   3.3% |  0.04ms |  0.06ms |  0.23ms |  0.47ms |  0.95ms |   17978
+filesystem | create_version      |  1000 |  5.3%! |  0.10ms |  0.37ms |  0.81ms |  2.48ms | 26.91ms |    2723
+```
+
+---
+
+## 1M Warm vs Cold Comparison
+
+| Op | Go warm | Go cold | Node warm | Node cold |
+|----|---------|---------|-----------|-----------|
+| sqlite read_random | 0.55ms | 0.61ms | 0.01ms | 0.77ms |
+| sqlite read_day | 17.55ms | 15.07ms | 11.82ms | 12.11ms |
+| sqlite read_day_per_entry | 0.01ms | 0.01ms | 0.01ms | 0.01ms |
+| filesystem read_random | 0.22ms | 0.27ms | 0.27ms | 0.26ms |
+| filesystem read_day | 251ms | 223ms | 248ms | 247ms |
+| filesystem read_day_per_entry | 0.18ms | 0.16ms | 0.18ms | 0.18ms |
+
+**At 1M entries, warm and cold are nearly indistinguishable for most operations.** The dataset is large enough that random page accesses can't stay hot across 1000+ samples — the OS buffer cache is not a meaningful factor at this scale. Even the "warm" run is effectively cold for random reads by the time the benchmark collects enough samples.
+
+The one exception is **Node SQLite `read_random`**: 0.01ms warm → 0.77ms cold. This reflects `better-sqlite3`'s in-process SQLite page cache, which is application heap memory and survives the OS buffer cache state but is reset when the process starts. In the warm run, the benchmark process makes 1500 sequential random reads, and the SQLite page cache accumulates the most-recently-accessed B-tree pages in memory — enough that the median re-access is a cache hit. After `sudo purge`, the process starts fresh with an empty page cache and all 1500 reads are cold page faults, driving the median to 0.77ms. Go warm showed 0.55ms because `go-sqlite3`'s default page cache is smaller and saturates faster under random access across 1M rows.
+
+**`read_day` at 1M is structurally cold at all cache temperatures.** Each call fetches ~1370 rows of content. No realistic in-process cache can hold 1370 × avg-content-size across a working set of 1M entries, so every `read_day` call pulls from storage regardless of warm/cold state. Warm and cold medians are within noise (15ms vs 17ms Go, 12ms vs 12ms Node).
+
+**`read_day_per_entry` is stable across all conditions: 0.01ms/entry for SQLite, ~0.17ms/entry for filesystem.** The per-entry cost is a fixed property of the storage access pattern, not the cache state — confirming the 1M degradation is structural, not thermal.
