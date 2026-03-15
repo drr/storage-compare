@@ -13,35 +13,41 @@ import (
 
 // SQLiteReadRandomOp returns an Op that picks a random entry and reads its latest version.
 func SQLiteReadRandomOp(db *backend.SQLiteBackend, idx []IndexEntry, rng *rand.Rand) Op {
-	return func() (time.Duration, bool) {
+	return func() (time.Duration, int, bool) {
 		e := idx[rng.Intn(len(idx))]
 		start := time.Now()
 		_, err := db.ReadLatest(e.ID)
-		return time.Since(start), err == nil
+		return time.Since(start), 1, err == nil
 	}
 }
 
 // SQLiteReadDayOp returns an Op that picks a random day and reads all latest entries in it.
+// The count returned is the number of entries in that day, enabling per-entry normalization.
 func SQLiteReadDayOp(db *backend.SQLiteBackend, dayPool map[string][]IndexEntry, rng *rand.Rand) Op {
 	days := make([]string, 0, len(dayPool))
 	for d := range dayPool {
 		days = append(days, d)
 	}
-	return func() (time.Duration, bool) {
+	return func() (time.Duration, int, bool) {
 		day := days[rng.Intn(len(days))]
 		t, _ := time.Parse("2006-01-02", day)
 		startMs := t.UTC().UnixMilli()
 		endMs := t.UTC().Add(24 * time.Hour).UnixMilli()
 		start := time.Now()
-		_, err := db.ReadDay(startMs, endMs)
-		return time.Since(start), err == nil
+		entries, err := db.ReadDay(startMs, endMs)
+		elapsed := time.Since(start)
+		count := len(entries)
+		if count < 1 {
+			count = 1
+		}
+		return elapsed, count, err == nil
 	}
 }
 
 // SQLiteCreateEntryOp returns an Op that inserts a new entry.
 func SQLiteCreateEntryOp(db *backend.SQLiteBackend, rng *rand.Rand) Op {
 	now := time.Now().UTC()
-	return func() (time.Duration, bool) {
+	return func() (time.Duration, int, bool) {
 		e := &model.Entry{
 			ID:         uuid.New().String(),
 			VersionID:  1,
@@ -53,7 +59,7 @@ func SQLiteCreateEntryOp(db *backend.SQLiteBackend, rng *rand.Rand) Op {
 		}
 		start := time.Now()
 		err := db.CreateEntry(e)
-		return time.Since(start), err == nil
+		return time.Since(start), 1, err == nil
 	}
 }
 
@@ -64,9 +70,9 @@ func SQLiteCreateVersionOp(db *backend.SQLiteBackend, idx []IndexEntry, rng *ran
 	pool := make([]IndexEntry, len(idx))
 	copy(pool, idx)
 	now := time.Now().UTC()
-	return func() (time.Duration, bool) {
+	return func() (time.Duration, int, bool) {
 		if len(pool) == 0 {
-			return 0, false
+			return 0, 1, false
 		}
 		pick := rng.Intn(len(pool))
 		ie := pool[pick]
@@ -75,11 +81,11 @@ func SQLiteCreateVersionOp(db *backend.SQLiteBackend, idx []IndexEntry, rng *ran
 
 		vCount, err := db.GetVersionCount(ie.ID)
 		if err != nil || vCount == 0 {
-			return 0, false
+			return 0, 1, false
 		}
 		existing, err := db.ReadLatest(ie.ID)
 		if err != nil {
-			return 0, false
+			return 0, 1, false
 		}
 		e := &model.Entry{
 			ID:         ie.ID,
@@ -92,6 +98,6 @@ func SQLiteCreateVersionOp(db *backend.SQLiteBackend, idx []IndexEntry, rng *ran
 		}
 		start := time.Now()
 		err = db.AddVersion(e)
-		return time.Since(start), err == nil
+		return time.Since(start), 1, err == nil
 	}
 }

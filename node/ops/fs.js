@@ -33,7 +33,7 @@ function isVersionedFile(name) {
   return /^\d+$/.test(base.slice(idx + 2));
 }
 
-// Returns an Op: () => BigInt latency in ns
+// Returns an Op: () => { ns: BigInt, count: 1 }
 function readRandomOp(fsRoot, index, rng) {
   return () => {
     const entry = index[Math.floor(rng() * index.length)];
@@ -42,14 +42,15 @@ function readRandomOp(fsRoot, index, rng) {
       const t0 = process.hrtime.bigint();
       const data = fsSync.readFileSync(filePath, 'utf8');
       matter(data);
-      return process.hrtime.bigint() - t0;
+      return { ns: process.hrtime.bigint() - t0, count: 1 };
     } catch {
       return null;
     }
   };
 }
 
-// Returns an Op: () => BigInt latency in ns
+// Returns an Op: () => { ns: BigInt, count: number }
+// count is the number of latest entries read from the day directory.
 function readDayOp(fsRoot, dayPool, rng) {
   const days = [...dayPool.keys()];
   const dayPathMap = new Map([...dayPool].map(([day, es]) => [day, es[0]?.day_path]));
@@ -59,18 +60,20 @@ function readDayOp(fsRoot, dayPool, rng) {
     try {
       const t0 = process.hrtime.bigint();
       const files = fsSync.readdirSync(dir);
+      let count = 0;
       for (const file of files) {
         if (!file.endsWith('.md') || isVersionedFile(file)) continue;
         matter(fsSync.readFileSync(path.join(dir, file), 'utf8'));
+        count++;
       }
-      return process.hrtime.bigint() - t0;
+      return { ns: process.hrtime.bigint() - t0, count: Math.max(1, count) };
     } catch {
       return null;
     }
   };
 }
 
-// Returns an Op: () => BigInt latency in ns (unlimited)
+// Returns an Op: () => { ns: BigInt, count: 1 } (unlimited)
 function createEntryOp(fsRoot, rng) {
   const now = new Date().toISOString();
   const today = now.slice(0, 10);
@@ -87,11 +90,11 @@ function createEntryOp(fsRoot, rng) {
     });
     const t0 = process.hrtime.bigint();
     fsSync.writeFileSync(filePath, content);
-    return process.hrtime.bigint() - t0;
+    return { ns: process.hrtime.bigint() - t0, count: 1 };
   };
 }
 
-// Returns an Op: () => BigInt | null (null when pool exhausted)
+// Returns an Op: () => { ns: BigInt, count: 1 } | null (null when pool exhausted)
 function createVersionOp(fsRoot, index, rng) {
   const pool = [...index];
   const now = new Date().toISOString();
@@ -113,7 +116,7 @@ function createVersionOp(fsRoot, index, rng) {
       const t0 = process.hrtime.bigint();
       fsSync.renameSync(latestPath, archivePath);
       fsSync.writeFileSync(latestPath, newContent);
-      return process.hrtime.bigint() - t0;
+      return { ns: process.hrtime.bigint() - t0, count: 1 };
     } catch {
       return null;
     }

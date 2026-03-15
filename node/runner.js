@@ -43,9 +43,13 @@ function medianConverged(sorted, precision) {
 
 // Run op in rounds of batchSize until the median CI width is below precision,
 // or maxN total valid samples are collected.
-// op() returns a BigInt nanosecond latency, or null to signal skip (pool exhausted).
+// op() returns { ns: BigInt, count: number } or null to signal skip (pool exhausted).
+// count=1 for point ops; actual entry count for read_day.
+// Returns { timings, perUnit (null if count was always 1), converged }.
 function runAdaptive(op, batchSize, precision, maxN) {
   const timings = [];
+  const perUnit = [];
+  let allCountOne = true;
   let converged = false;
 
   while (timings.length < maxN) {
@@ -53,9 +57,13 @@ function runAdaptive(op, batchSize, precision, maxN) {
     let consecutiveFails = 0;
     let collected = 0;
     while (collected < need && consecutiveFails < 20) {
-      const t = op();
-      if (t !== null) {
-        timings.push(t);
+      const result = op();
+      if (result !== null) {
+        const { ns, count } = result;
+        const c = (count && count > 1) ? count : 1;
+        timings.push(ns);
+        perUnit.push(ns / BigInt(c));
+        if (c !== 1) allCountOne = false;
         consecutiveFails = 0;
         collected++;
       } else {
@@ -77,7 +85,7 @@ function runAdaptive(op, batchSize, precision, maxN) {
     converged = medianConverged(sorted, precision);
   }
 
-  return { timings, converged };
+  return { timings, perUnit: allCountOne ? null : perUnit, converged };
 }
 
 function computeStats(timingsNs) {
@@ -106,7 +114,7 @@ function fmtCI(ciWidth, converged) {
 
 function printTable(results, population) {
   console.log(`Runtime: node  |  Population: ${population}  |  Date: ${new Date().toISOString().replace('T', ' ').slice(0, 19)}\n`);
-  const w = [10, 15, 5, 6, 7, 7, 7, 7, 7, 7];
+  const w = [10, 19, 5, 6, 7, 7, 7, 7, 7, 7];
   const hdr = ['Backend', 'Operation', 'N', 'medCI', 'Min', 'Median', 'P95', 'P99', 'Max', 'ops/sec'];
   console.log(
     hdr[0].padEnd(w[0]) + ' | ' + hdr[1].padEnd(w[1]) + ' | ' +
@@ -115,17 +123,23 @@ function printTable(results, population) {
     hdr[6].padStart(w[6]) + ' | ' + hdr[7].padStart(w[7]) + ' | ' +
     hdr[8].padStart(w[8]) + ' | ' + hdr[9].padStart(w[9])
   );
-  console.log('-'.repeat(105));
-  for (const r of results) {
-    const s = computeStats(r.timings);
-    if (!s) continue;
+  console.log('-'.repeat(109));
+  const printRow = (backend, operation, timingsNs, converged) => {
+    const s = computeStats(timingsNs);
+    if (!s) return;
     console.log(
-      r.backend.padEnd(w[0]) + ' | ' + r.operation.padEnd(w[1]) + ' | ' +
-      String(s.n).padStart(w[2]) + ' | ' + fmtCI(s.ciWidth, r.converged).padStart(w[3]) + ' | ' +
+      backend.padEnd(w[0]) + ' | ' + operation.padEnd(w[1]) + ' | ' +
+      String(s.n).padStart(w[2]) + ' | ' + fmtCI(s.ciWidth, converged).padStart(w[3]) + ' | ' +
       fmtDur(s.min).padStart(w[4]) + ' | ' + fmtDur(s.median).padStart(w[5]) + ' | ' +
       fmtDur(s.p95).padStart(w[6]) + ' | ' + fmtDur(s.p99).padStart(w[7]) + ' | ' +
       fmtDur(s.max).padStart(w[8]) + ' | ' + Math.round(s.opsSec).toString().padStart(w[9])
     );
+  };
+  for (const r of results) {
+    printRow(r.backend, r.operation, r.timings, r.converged);
+    if (r.perUnit) {
+      printRow(r.backend, r.operation + '_per_entry', r.perUnit, r.converged);
+    }
   }
 }
 

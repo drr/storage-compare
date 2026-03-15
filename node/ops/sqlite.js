@@ -21,7 +21,7 @@ function generateContent(rng) {
   return out + '.\n';
 }
 
-// Returns an Op: () => BigInt latency in ns
+// Returns an Op: () => { ns: BigInt, count: 1 }
 function readRandomOp(db, index, rng) {
   const stmt = db.prepare(
     'SELECT id, version_id, entry_type, create_time, modify_time, is_latest, content FROM entries WHERE id = ? AND is_latest = 1'
@@ -30,11 +30,12 @@ function readRandomOp(db, index, rng) {
     const entry = index[Math.floor(rng() * index.length)];
     const t0 = process.hrtime.bigint();
     stmt.get(entry.id);
-    return process.hrtime.bigint() - t0;
+    return { ns: process.hrtime.bigint() - t0, count: 1 };
   };
 }
 
-// Returns an Op: () => BigInt latency in ns
+// Returns an Op: () => { ns: BigInt, count: number }
+// count is the number of entries returned for that day, enabling per-entry normalization.
 function readDayOp(db, dayPool, rng) {
   const days = [...dayPool.keys()];
   const stmt = db.prepare(
@@ -44,12 +45,12 @@ function readDayOp(db, dayPool, rng) {
     const day = days[Math.floor(rng() * days.length)];
     const t = new Date(day + 'T00:00:00Z').getTime();
     const t0 = process.hrtime.bigint();
-    stmt.all(t, t + 86400000);
-    return process.hrtime.bigint() - t0;
+    const rows = stmt.all(t, t + 86400000);
+    return { ns: process.hrtime.bigint() - t0, count: Math.max(1, rows.length) };
   };
 }
 
-// Returns an Op: () => BigInt latency in ns (unlimited, no pool)
+// Returns an Op: () => { ns: BigInt, count: 1 } (unlimited, no pool)
 function createEntryOp(db, rng) {
   const stmt = db.prepare(
     'INSERT INTO entries (id, version_id, entry_type, create_time, modify_time, is_latest, content) VALUES (?, ?, ?, ?, ?, 1, ?)'
@@ -60,11 +61,11 @@ function createEntryOp(db, rng) {
     const content = generateContent(rng);
     const t0 = process.hrtime.bigint();
     stmt.run(id, 1, 'markdown-text', now, now, content);
-    return process.hrtime.bigint() - t0;
+    return { ns: process.hrtime.bigint() - t0, count: 1 };
   };
 }
 
-// Returns an Op: () => BigInt | null (null when pool exhausted)
+// Returns an Op: () => { ns: BigInt, count: 1 } | null (null when pool exhausted)
 function createVersionOp(db, index, rng) {
   const getVersion = db.prepare('SELECT MAX(version_id) as max_v, create_time FROM entries WHERE id = ?');
   const archive = db.prepare('UPDATE entries SET is_latest = 0 WHERE id = ? AND is_latest = 1');
@@ -88,7 +89,7 @@ function createVersionOp(db, index, rng) {
     const content = generateContent(rng);
     const t0 = process.hrtime.bigint();
     doVersion(entry.id, content, now);
-    return process.hrtime.bigint() - t0;
+    return { ns: process.hrtime.bigint() - t0, count: 1 };
   };
 }
 

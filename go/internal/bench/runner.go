@@ -48,65 +48,74 @@ func DayPool(idx []IndexEntry, minEntries int) map[string][]IndexEntry {
 }
 
 // Op is a single invocation of a benchmark operation.
-// Returns (latency, ok). ok=false means this call should be skipped
+// Returns (latency, count, ok).
+// count is the number of logical units processed (1 for point ops; number of
+// entries read for read_day). ok=false means this call should be skipped
 // (e.g. pool exhausted for create_version); the runner will not count it.
-type Op func() (time.Duration, bool)
+type Op func() (time.Duration, int, bool)
 
 // RunAdaptive runs op in rounds of batchSize until the 95% CI for the median
 // is narrower than precision (relative to the median), or maxN total valid
 // samples are collected. batchSize is never decreased below its initial value.
-// Returns the collected timings and whether convergence was achieved.
-func RunAdaptive(op Op, batchSize int, precision float64, maxN int) ([]time.Duration, bool) {
+// Returns raw timings, per-unit timings (duration/count per sample; nil if
+// count was always 1), and whether convergence was achieved.
+func RunAdaptive(op Op, batchSize int, precision float64, maxN int) ([]time.Duration, []time.Duration, bool) {
 	timings := make([]time.Duration, 0, batchSize)
-	collectBatch := func(n int) {
-		consecutiveFails := 0
-		for len(timings) < cap(timings) && consecutiveFails < 20 {
-			d, ok := op()
-			if ok {
-				timings = append(timings, d)
-				consecutiveFails = 0
-			} else {
-				consecutiveFails++
-			}
-		}
-		_ = n
-	}
+	perUnit := make([]time.Duration, 0, batchSize)
+	allCountOne := true
 
-	// Use a simpler approach: collect in rounds, check convergence between rounds.
-	collected := 0
-	for collected < maxN {
-		need := min(batchSize, maxN-collected)
-		// Grow cap if needed
-		if cap(timings)-len(timings) < need {
-			next := make([]time.Duration, len(timings), len(timings)+need)
-			copy(next, timings)
-			timings = next
-		}
-		_ = collectBatch
-
+	collect := func(need int) bool {
 		consecutiveFails := 0
 		for i := 0; i < need && consecutiveFails < 20; {
-			d, ok := op()
+			d, count, ok := op()
 			if ok {
+				if count < 1 {
+					count = 1
+				}
 				timings = append(timings, d)
-				collected++
+				perUnit = append(perUnit, d/time.Duration(count))
+				if count != 1 {
+					allCountOne = false
+				}
 				consecutiveFails = 0
 				i++
 			} else {
 				consecutiveFails++
 			}
 		}
+		return consecutiveFails < 20
+	}
 
-		if consecutiveFails >= 20 {
-			break // op is exhausted (e.g. pool drained)
+	collected := 0
+	for collected < maxN {
+		need := min(batchSize, maxN-collected)
+		if cap(timings)-len(timings) < need {
+			next := make([]time.Duration, len(timings), len(timings)+need)
+			copy(next, timings)
+			timings = next
+			next2 := make([]time.Duration, len(perUnit), len(perUnit)+need)
+			copy(next2, perUnit)
+			perUnit = next2
 		}
 
+		if !collect(need) {
+			break // op exhausted
+		}
+		collected = len(timings)
+
 		if medianConverged(timings, precision) {
-			return timings, true
+			if allCountOne {
+				return timings, nil, true
+			}
+			return timings, perUnit, true
 		}
 	}
 
-	return timings, medianConverged(timings, precision)
+	converged := medianConverged(timings, precision)
+	if allCountOne {
+		return timings, nil, converged
+	}
+	return timings, perUnit, converged
 }
 
 // medianConverged returns true if the 95% CI for the median (computed via
@@ -175,6 +184,7 @@ type Result struct {
 	Backend   string
 	Operation string
 	Timings   []time.Duration
+	PerUnit   []time.Duration // per-entry timings (duration/count); nil if count was always 1
 	Converged bool
 }
 
@@ -236,20 +246,27 @@ func fmtCI(ci float64, converged bool) string {
 // PrintTable prints the results in the ASCII table format.
 // The medCI column shows the relative 95% CI width for the median;
 // a trailing '!' means the precision target was not reached.
+// For read_day operations, an extra per-entry row is emitted when PerUnit is set.
 func PrintTable(results []*Result, population int) {
 	fmt.Printf("Runtime: go  |  Population: %d  |  Date: %s\n\n",
 		population, time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Printf("%-10s | %-15s | %5s | %6s | %7s | %7s | %7s | %7s | %7s | %7s\n",
+	fmt.Printf("%-10s | %-19s | %5s | %6s | %7s | %7s | %7s | %7s | %7s | %7s\n",
 		"Backend", "Operation", "N", "medCI", "Min", "Median", "P95", "P99", "Max", "ops/sec")
-	fmt.Println(strings.Repeat("-", 100))
-	for _, r := range results {
-		s := r.Stats()
-		fmt.Printf("%-10s | %-15s | %5d | %6s | %7s | %7s | %7s | %7s | %7s | %7.0f\n",
-			r.Backend, r.Operation, s.N,
-			fmtCI(s.MedianCI, r.Converged),
+	fmt.Println(strings.Repeat("-", 104))
+	printRow := func(backend, operation string, timings []time.Duration, converged bool) {
+		s := ComputeStats(timings)
+		fmt.Printf("%-10s | %-19s | %5d | %6s | %7s | %7s | %7s | %7s | %7s | %7.0f\n",
+			backend, operation, s.N,
+			fmtCI(s.MedianCI, converged),
 			fmtDur(s.Min), fmtDur(s.Median), fmtDur(s.P95), fmtDur(s.P99), fmtDur(s.Max),
 			s.OpsSec,
 		)
+	}
+	for _, r := range results {
+		printRow(r.Backend, r.Operation, r.Timings, r.Converged)
+		if r.PerUnit != nil {
+			printRow(r.Backend, r.Operation+"_per_entry", r.PerUnit, r.Converged)
+		}
 	}
 }
 

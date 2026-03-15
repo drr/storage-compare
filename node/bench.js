@@ -49,8 +49,8 @@ const fsRoot = path.join(dataDir, 'fs');
 const results = [];
 
 function run(backend, operation, minN, op) {
-  const { timings, converged } = runAdaptive(op, minN, PRECISION, minN * MAX_FACTOR);
-  results.push({ backend, operation, timings, converged });
+  const { timings, perUnit, converged } = runAdaptive(op, minN, PRECISION, minN * MAX_FACTOR);
+  results.push({ backend, operation, timings, perUnit, converged });
   saveCSV(resultsDir, backend, operation, timings);
 }
 

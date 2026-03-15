@@ -64,8 +64,8 @@ func main() {
 	var results []*bench.Result
 
 	run := func(backendName, opName string, minN int, op bench.Op) {
-		timings, converged := bench.RunAdaptive(op, minN, *precision, minN**maxFactor)
-		r := &bench.Result{Backend: backendName, Operation: opName, Timings: timings, Converged: converged}
+		timings, perUnit, converged := bench.RunAdaptive(op, minN, *precision, minN**maxFactor)
+		r := &bench.Result{Backend: backendName, Operation: opName, Timings: timings, PerUnit: perUnit, Converged: converged}
 		results = append(results, r)
 		if err := bench.SaveCSV(*resultsDir, "go", backendName, opName, timings); err != nil {
 			log.Printf("save csv %s/%s: %v", backendName, opName, err)
