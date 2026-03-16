@@ -55,6 +55,61 @@ track parent shade division sheet substance favor connect post spend chord fat g
 charge proper bar offer segment slave duck instant market degree populate chick dear enemy reply drink occur support
 speech nature range steam motion path liquid log meant quotient teeth shell neck`
 
+// TagPhrases is a list of short English phrases embedded in a fraction of entries
+// to enable FTS5 benchmarking. Each phrase is realistic and searchable.
+var TagPhrases = []string{
+	"meeting notes",
+	"action items",
+	"deployment plan",
+	"sprint planning",
+	"technical debt",
+	"code review",
+	"release notes",
+	"bug report",
+	"feature request",
+	"architecture decision",
+	"performance review",
+	"project kickoff",
+	"status update",
+	"retrospective notes",
+	"quarterly goals",
+	"incident report",
+	"design review",
+	"onboarding checklist",
+	"team sync",
+	"product roadmap",
+	"security audit",
+	"capacity planning",
+	"risk assessment",
+	"knowledge transfer",
+	"post mortem",
+}
+
+// GenerateWithPhrase generates content like Generate but inserts phrase at a
+// random word boundary within the generated text.
+func GenerateWithPhrase(rng *rand.Rand, phrase string) string {
+	wordCount := lognormal(rng, 4.0, 1.5)
+	if wordCount < 20 {
+		wordCount = 20
+	}
+	if wordCount > 20000 {
+		wordCount = 20000
+	}
+	base := generateMarkdown(rng, wordCount)
+	// Collect space positions as candidate insertion points.
+	var spaces []int
+	for i, c := range base {
+		if c == ' ' {
+			spaces = append(spaces, i)
+		}
+	}
+	if len(spaces) == 0 {
+		return base[:len(base)-1] + " " + phrase + "\n"
+	}
+	pos := spaces[rng.Intn(len(spaces))]
+	return base[:pos] + " " + phrase + base[pos:]
+}
+
 // Generate returns a markdown string with approximately `words` words.
 // It uses log-normal distribution: mu=4.0, sigma=1.5, clamped to [5, 20000].
 func Generate(rng *rand.Rand) string {

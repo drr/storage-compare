@@ -1,5 +1,6 @@
-.PHONY: setup generate generate-scale generate-append \
+.PHONY: setup generate generate-scale generate-append generate-fts \
         bench-cold bench-warm bench-go bench-node bench-all \
+        bench-go-fts bench-node-fts bench-fts bench-cold-fts \
         results clean-data clean check-go verify
 
 DATA_DIR     ?= ./data
@@ -61,6 +62,16 @@ generate-append: check-go
 	  --data-dir ../$(DATA_DIR) \
 	  --append
 
+generate-fts: check-go
+	@echo "==> Generating $(COUNT) entries with FTS..."
+	cd go && go run -tags sqlite_fts5 ./cmd/generate \
+	  --count $(COUNT) \
+	  --data-dir ../$(DATA_DIR) \
+	  $(if $(filter-out 0,$(SEED)),--seed $(SEED),) \
+	  --fts
+	@touch $(GO_GENERATE)
+	@echo "==> FTS generation complete."
+
 # ─── Benchmarks ──────────────────────────────────────────────────────────────
 
 bench-cold:
@@ -72,6 +83,16 @@ bench-cold:
 	sudo purge
 	@$(MAKE) bench-node 2>&1 | tee -a $(COLD_OUT)
 	@echo "==> Cold results written to $(COLD_OUT)"
+
+bench-cold-fts:
+	@rm -f $(COLD_OUT)
+	@echo "==> Purging OS buffer cache for Go FTS run..."
+	sudo purge
+	@$(MAKE) bench-go-fts 2>&1 | tee -a $(COLD_OUT)
+	@echo "==> Purging OS buffer cache for Node FTS run..."
+	sudo purge
+	@$(MAKE) bench-node-fts 2>&1 | tee -a $(COLD_OUT)
+	@echo "==> Cold FTS results written to $(COLD_OUT)"
 
 bench-warm: bench-all
 
@@ -91,6 +112,24 @@ bench-node:
 	  --data-dir ../$(DATA_DIR) \
 	  --results-dir ../$(RESULTS_DIR)
 
+bench-go-fts: check-go
+	@echo "==> Running Go FTS benchmark..."
+	@mkdir -p $(RESULTS_DIR)/go
+	cd go && go run -tags sqlite_fts5 ./cmd/bench \
+	  --data-dir ../$(DATA_DIR) \
+	  --results-dir ../$(RESULTS_DIR) \
+	  --fts
+
+bench-node-fts:
+	@echo "==> Running Node.js FTS benchmark..."
+	@mkdir -p $(RESULTS_DIR)/node
+	cd node && $(NODE) bench.js \
+	  --data-dir ../$(DATA_DIR) \
+	  --results-dir ../$(RESULTS_DIR) \
+	  --fts
+
+bench-fts: bench-go-fts bench-node-fts
+
 # ─── Results ─────────────────────────────────────────────────────────────────
 
 results:
@@ -109,11 +148,15 @@ verify:
 	@find $(DATA_DIR)/fs -name '*-v[0-9]*.md' | wc -l | xargs echo "Versioned files:"
 	@echo "==> Index entry count:"
 	@python3 -c "import json; print(len(json.load(open('$(DATA_DIR)/index.json'))))"
+	@if [ -f $(DATA_DIR)/sqlite-fts/notes.db ]; then \
+	  echo "==> SQLite-FTS indexed rows:"; \
+	  sqlite3 $(DATA_DIR)/sqlite-fts/notes.db "SELECT COUNT(*) FROM entries_fts;"; \
+	fi
 
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf $(DATA_DIR)/sqlite $(DATA_DIR)/fs $(DATA_DIR)/index.json $(GO_GENERATE)
+	rm -rf $(DATA_DIR)/sqlite $(DATA_DIR)/sqlite-fts $(DATA_DIR)/fs $(DATA_DIR)/index.json $(GO_GENERATE)
 
 clean: clean-data
 	rm -rf $(RESULTS_DIR) $(COLD_OUT)

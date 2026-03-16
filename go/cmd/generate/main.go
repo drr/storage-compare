@@ -30,12 +30,13 @@ func main() {
 	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
 	batchSize := flag.Int("batch-size", 500, "SQLite insert batch size")
 	appendMode := flag.Bool("append", false, "add to existing population without truncating")
+	fts := flag.Bool("fts", false, "also write to SQLite-FTS database at data/sqlite-fts/notes.db")
 	flag.Parse()
 
 	rng := rand.New(rand.NewSource(*seed))
 
 	dbPath := filepath.Join(*dataDir, "sqlite", "notes.db")
-	fsRoot := filepath.Join(*dataDir, "fs")
+	ftsDPath := filepath.Join(*dataDir, "sqlite-fts", "notes.db")
 	indexPath := filepath.Join(*dataDir, "index.json")
 
 	// Open backends
@@ -45,9 +46,22 @@ func main() {
 	}
 	defer sqliteDB.Close()
 
-	fsDB, err := backend.OpenFS(fsRoot)
-	if err != nil {
-		log.Fatalf("open fs: %v", err)
+	var ftsDB *backend.SQLiteFTSBackend
+	if *fts {
+		ftsDB, err = backend.OpenSQLiteFTS(ftsDPath)
+		if err != nil {
+			log.Fatalf("open sqlite-fts: %v", err)
+		}
+		defer ftsDB.Close()
+	}
+
+	var fsDB *backend.FSBackend
+	if !*fts {
+		fsRoot := filepath.Join(*dataDir, "fs")
+		fsDB, err = backend.OpenFS(fsRoot)
+		if err != nil {
+			log.Fatalf("open fs: %v", err)
+		}
 	}
 
 	// Determine time range
@@ -76,7 +90,14 @@ func main() {
 	entries := make([]*model.Entry, 0, *count)
 	for i := 0; i < *count; i++ {
 		id := uuid.New().String()
-		content := wordgen.Generate(rng)
+		var content string
+		// When FTS is enabled, 10% of entries get a searchable phrase embedded.
+		if *fts && rng.Intn(10) == 0 {
+			phrase := wordgen.TagPhrases[rng.Intn(len(wordgen.TagPhrases))]
+			content = wordgen.GenerateWithPhrase(rng, phrase)
+		} else {
+			content = wordgen.Generate(rng)
+		}
 
 		// Uniform random timestamp in range
 		offsetSecs := rng.Float64() * totalSeconds
@@ -100,9 +121,9 @@ func main() {
 		entries = append(entries, e)
 	}
 
-	// Write to both backends in parallel
+	// Write to backends in parallel
 	var wg sync.WaitGroup
-	var sqliteErr, fsErr error
+	var sqliteErr, ftsErr, fsErr error
 
 	wg.Add(1)
 	go func() {
@@ -114,17 +135,34 @@ func main() {
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Printf("Writing %d entries to filesystem...", len(entries))
-		fsErr = fsDB.BulkWrite(entries)
-	}()
+	if ftsDB != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("Writing %d entries to SQLite-FTS...", len(entries))
+			ftsErr = ftsDB.BulkInsert(entries, *batchSize)
+			if ftsErr == nil {
+				ftsErr = ftsDB.Analyze()
+			}
+		}()
+	}
+
+	if fsDB != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("Writing %d entries to filesystem...", len(entries))
+			fsErr = fsDB.BulkWrite(entries)
+		}()
+	}
 
 	wg.Wait()
 
 	if sqliteErr != nil {
 		log.Fatalf("sqlite write: %v", sqliteErr)
+	}
+	if ftsErr != nil {
+		log.Fatalf("sqlite-fts write: %v", ftsErr)
 	}
 	if fsErr != nil {
 		log.Fatalf("fs write: %v", fsErr)
@@ -171,6 +209,15 @@ func main() {
 		log.Printf("count verify: %v", err)
 	} else {
 		log.Printf("SQLite latest count: %d", count2)
+	}
+
+	if ftsDB != nil {
+		ftsCount, err := ftsDB.CountFTS()
+		if err != nil {
+			log.Printf("fts count verify: %v", err)
+		} else {
+			log.Printf("SQLite-FTS indexed rows: %d", ftsCount)
+		}
 	}
 
 	log.Printf("Done. index.json has %d entries.", len(index))

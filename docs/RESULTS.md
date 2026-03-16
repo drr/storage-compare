@@ -314,3 +314,196 @@ This is the deepest structural difference between the two backends: SQLite trans
 **`read_day` at 1M is structurally cold at all cache temperatures.** Each call fetches ~1370 rows of content. No realistic in-process cache can hold 1370 × avg-content-size across a working set of 1M entries, so every `read_day` call pulls from storage regardless of warm/cold state. Warm and cold medians are within noise (15ms vs 17ms Go, 12ms vs 12ms Node).
 
 **`read_day_per_entry` is stable across all conditions: 0.01ms/entry for SQLite, ~0.17ms/entry for filesystem.** The per-entry cost is a fixed property of the storage access pattern, not the cache state — confirming the 1M degradation is structural, not thermal.
+
+---
+
+## FTS5 Warm Cache Run (10k Entries)
+
+**Conditions:** `make clean && make generate-fts COUNT=10000 && make bench-fts`. FTS mode skips the filesystem entirely — only `data/sqlite/` and `data/sqlite-fts/` are populated. The benchmark compares plain SQLite against SQLite-with-FTS5 to isolate the cost of maintaining the FTS index. `better-sqlite3` is used on the Node side; `go-sqlite3` with `-tags sqlite_fts5` (porter unicode61 tokenizer) on the Go side.
+
+### Go
+
+```
+Backend    | Operation            |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+--------------------------------------------------------------------------------------------------------
+sqlite     | read_random          |  1000 |   3.3% |  0.01ms |  0.01ms |  0.02ms |  0.03ms |  0.12ms |   71644
+sqlite     | read_day             |   600 |   4.9% |  0.05ms |  0.08ms |  0.13ms |  0.16ms |  0.22ms |   12429
+sqlite     | read_day_per_entry   |   600 |   3.1% |  0.00ms |  0.01ms |  0.01ms |  0.01ms |  0.02ms |  176274
+sqlite     | create_entry         |  2500 |   4.3% |  0.02ms |  0.03ms |  0.07ms |  0.10ms |  7.61ms |   29233
+sqlite     | create_version       |  1200 |   4.2% |  0.04ms |  0.05ms |  0.08ms |  0.14ms |  8.04ms |   18533
+sqlite-fts | read_random          |  1000 |   3.8% |  0.01ms |  0.01ms |  0.02ms |  0.03ms |  0.09ms |   76923
+sqlite-fts | read_day             |   600 |   4.4% |  0.04ms |  0.08ms |  0.12ms |  0.20ms |  0.22ms |   12917
+sqlite-fts | read_day_per_entry   |   600 |   2.7% |  0.00ms |  0.01ms |  0.01ms |  0.01ms |  0.02ms |  179372
+sqlite-fts | create_entry         |  3000 |   4.5% |  0.04ms |  0.09ms |  0.41ms |  4.81ms | 17.67ms |   11326
+sqlite-fts | create_version       |  2000 |  5.1%! |  0.06ms |  0.11ms |  0.43ms |  5.61ms | 13.44ms |    9046
+sqlite-fts | fts_search           |  1200 |   4.6% |  0.08ms |  0.16ms |  0.24ms |  0.93ms |  1.13ms |    6294
+sqlite-fts | fts_search_per_entry |  1200 |   3.3% |  0.00ms |  0.00ms |  0.01ms |  0.01ms |  0.01ms |  264340
+```
+
+### Node
+
+```
+Backend    | Operation            |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+-------------------------------------------------------------------------------------------------------------
+sqlite     | read_random          |  1500 |   4.7% |  0.00ms |  0.01ms |  0.01ms |  0.02ms |  0.70ms |  161082
+sqlite     | read_day             |   500 |   4.9% |  0.02ms |  0.04ms |  0.07ms |  0.09ms |  0.23ms |   25397
+sqlite     | read_day_per_entry   |   500 |   4.4% |  0.00ms |  0.00ms |  0.00ms |  0.01ms |  0.02ms |  312793
+sqlite     | create_entry         |  2000 |   4.7% |  0.01ms |  0.03ms |  0.06ms |  0.10ms |  8.63ms |   36697
+sqlite     | create_version       |  1000 |  7.1%! |  0.02ms |  0.04ms |  0.08ms |  0.11ms |  8.41ms |   26578
+sqlite-fts | read_random          |  1500 |   4.6% |  0.00ms |  0.01ms |  0.02ms |  0.03ms |  0.17ms |  158932
+sqlite-fts | read_day             |  1000 |  6.1%! |  0.01ms |  0.04ms |  0.06ms |  0.08ms |  0.18ms |   27713
+sqlite-fts | read_day_per_entry   |  1000 |  3.0%! |  0.00ms |  0.00ms |  0.00ms |  0.01ms |  0.02ms |  308642
+sqlite-fts | create_entry         |  1800 |   4.8% |  0.04ms |  0.07ms |  0.21ms |  5.04ms | 16.45ms |   13945
+sqlite-fts | create_version       |  1000 |  7.4%! |  0.05ms |  0.10ms |  0.29ms |  5.57ms | 13.04ms |    9760
+sqlite-fts | fts_search           |  1000 |  6.7%! |  0.06ms |  0.09ms |  0.19ms |  0.68ms |  0.87ms |   10904
+sqlite-fts | fts_search_per_entry |  1000 |  4.0%! |  0.00ms |  0.00ms |  0.00ms |  0.01ms |  0.01ms |  452489
+```
+
+---
+
+## Observations: SQLite vs SQLite-FTS5
+
+### Reads: zero overhead from the FTS index
+
+`read_random` and `read_day` are statistically indistinguishable between `sqlite` and `sqlite-fts` at both runtimes. The FTS5 virtual table is a separate B-tree; reads against the `entries` table do not touch it. Adding FTS to a database imposes no read-path penalty whatsoever.
+
+### Writes: the trigger tax
+
+The AFTER INSERT trigger that keeps `entries_fts` in sync fires on every `INSERT INTO entries`, adding a second B-tree write to each operation.
+
+| Op | sqlite (Go) | sqlite-fts (Go) | ratio | sqlite (Node) | sqlite-fts (Node) | ratio |
+|----|-------------|-----------------|-------|---------------|-------------------|-------|
+| create_entry | 0.03ms | 0.09ms | 3× | 0.03ms | 0.07ms | 2.3× |
+| create_version | 0.05ms | 0.11ms | 2.2× | 0.04ms | 0.10ms | 2.5× |
+
+The median write cost roughly triples for `create_entry` and more than doubles for `create_version`. This is the fundamental cost of synchronous FTS maintenance: every write to the main table pays for a write to the inverted index in the same transaction. At 10k entries the FTS B-tree is small and hot, so this overhead is still in the 0.07–0.11ms range — fast enough for interactive use. At 1M entries the FTS B-tree will be larger and the per-write cost will increase.
+
+The P99/Max spikes (up to 17ms) on FTS writes are larger than on plain SQLite writes, because an FTS5 checkpoint flushes both the main WAL and the FTS shadow tables together.
+
+### FTS search latency
+
+`fts_search` issues `SELECT entry_id FROM entries_fts WHERE entries_fts MATCH ? ORDER BY rank LIMIT 100` against a random phrase from the 25-phrase tag set. At 10k entries with 10% phrase embedding, each phrase matches ~40 entries on average.
+
+| | Go | Node |
+|---|---|---|
+| fts_search median | 0.16ms | 0.09ms |
+| fts_search_per_entry | <0.001ms | <0.001ms |
+
+A full-text query with ranking returns in under 0.2ms warm. The per-entry cost is sub-microsecond — once the index is traversed, returning additional matching rows is nearly free. Node is roughly 2× faster here for the same reason it leads on plain SQLite reads: `better-sqlite3`'s synchronous prepared-statement path avoids cgo round-trip overhead.
+
+### Convergence
+
+Several Node rows show `!` (did not converge within 10× default N). This is driven by write tail variance: the ratio of a ~14ms FTS checkpoint spike to a ~0.07ms median creates a CI that requires many hundreds of samples to stabilize. The median values are reliable; the `!` flag is a precision note, not a data quality problem. The Go `create_version` row also hit `5.1%!` for the same reason. This variance pattern will be worth watching at 1M entries where write tails are likely to grow.
+
+### Key Takeaway (FTS, 10k)
+
+FTS5 is read-free and write-taxed. If the workload is predominantly read-heavy with occasional writes, adding FTS costs nothing on the read path and the write overhead (2–3× median, still sub-millisecond at 10k) is acceptable. If the workload is write-intensive — bulk imports, high-frequency version creation — the trigger cost accumulates and the 1M scale run will be the critical data point to evaluate whether it remains acceptable.
+
+---
+
+## FTS5 Warm Cache Run (1M Entries)
+
+**Conditions:** `make clean && make generate-fts COUNT=1000000 && make bench-fts`. Same setup as the 10k FTS run, scaled to 1M entries. Each phrase from the 25-phrase tag set now matches ~4,000 entries on average (10% embedding rate × 1M entries ÷ 25 phrases), but `fts_search` uses `LIMIT 100` so only the top-ranked results are returned.
+
+### Go
+
+```
+Backend    | Operation            |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+--------------------------------------------------------------------------------------------------------
+sqlite     | read_random          |  6000 |   4.6% |  0.01ms |  0.02ms |  0.25ms |  0.44ms |  1.10ms |   43877
+sqlite     | read_day             |   400 |   4.6% |  0.37ms | 15.63ms | 42.30ms | 61.46ms | 78.51ms |      64
+sqlite     | read_day_per_entry   |   400 |   5.5% |  0.01ms |  0.01ms |  0.03ms |  0.04ms |  0.06ms |   87214
+sqlite     | create_entry         |  1500 |   4.7% |  0.02ms |  0.04ms |  0.07ms |  0.10ms | 13.42ms |   25157
+sqlite     | create_version       |   800 |   4.1% |  0.04ms |  0.06ms |  0.12ms |  0.24ms | 15.71ms |   16097
+sqlite-fts | read_random          |  1000 |   2.7% |  0.01ms |  0.02ms |  0.16ms |  0.26ms |  0.47ms |   50208
+sqlite-fts | read_day             |   400 |   2.3% | 12.04ms | 14.45ms | 21.13ms | 27.47ms | 33.62ms |      69
+sqlite-fts | read_day_per_entry   |   400 |   2.0% |  0.01ms |  0.01ms |  0.02ms |  0.02ms |  0.02ms |   95274
+sqlite-fts | create_entry         |  1000 |   4.9% |  0.05ms |  0.09ms |  0.37ms |  5.76ms |  8.21ms |   11152
+sqlite-fts | create_version       |  1800 |   4.9% |  0.07ms |  0.12ms |  0.45ms |  6.88ms | 24.25ms |    8439
+sqlite-fts | fts_search           |   600 |   3.7% |  4.66ms |  5.46ms | 59.99ms | 62.68ms | 66.12ms |     183
+sqlite-fts | fts_search_per_entry |   600 |   3.7% |  0.05ms |  0.05ms |  0.60ms |  0.63ms |  0.66ms |   18315
+```
+
+### Node
+
+```
+Backend    | Operation            |     N |  medCI |     Min |  Median |     P95 |     P99 |     Max | ops/sec
+-------------------------------------------------------------------------------------------------------------
+sqlite     | read_random          |  1000 |   3.7% |  0.00ms |  0.01ms |  0.02ms |  0.03ms |  0.25ms |   79738
+sqlite     | read_day             |   100 |   4.4% | 10.86ms | 12.34ms | 13.47ms | 15.29ms | 15.77ms |      81
+sqlite     | read_day_per_entry   |   100 |   4.1% |  0.01ms |  0.01ms |  0.01ms |  0.01ms |  0.01ms |  111272
+sqlite     | create_entry         |  2000 |  5.9%! |  0.02ms |  0.03ms |  0.06ms |  0.10ms | 15.17ms |   29304
+sqlite     | create_version       |   500 |   5.0% |  0.03ms |  0.05ms |  0.08ms |  0.32ms | 14.28ms |   18433
+sqlite-fts | read_random          |   500 |   5.0% |  0.01ms |  0.01ms |  0.02ms |  0.03ms |  0.19ms |   74305
+sqlite-fts | read_day             |   100 |   2.6% | 10.45ms | 11.99ms | 13.28ms | 13.85ms | 14.18ms |      83
+sqlite-fts | read_day_per_entry   |   100 |   3.0% |  0.01ms |  0.01ms |  0.01ms |  0.01ms |  0.01ms |  114718
+sqlite-fts | create_entry         |   600 |   4.4% |  0.04ms |  0.07ms |  0.21ms |  5.92ms |  7.16ms |   13393
+sqlite-fts | create_version       |   400 |   5.0% |  0.06ms |  0.10ms |  0.27ms |  6.49ms |  7.30ms |   10084
+sqlite-fts | fts_search           |  1000 |  6.3%! |  2.63ms |  3.51ms |  8.43ms | 49.33ms | 52.11ms |     285
+sqlite-fts | fts_search_per_entry |  1000 |  6.3%! |  0.03ms |  0.04ms |  0.08ms |  0.49ms |  0.52ms |   28484
+```
+
+---
+
+## Observations: FTS5 at 1M Entries
+
+### Reads: still zero overhead
+
+`read_random` and `read_day` remain indistinguishable between `sqlite` and `sqlite-fts` at 1M, exactly as at 10k. Go `read_day` median: 15.63ms vs 14.45ms — within noise given the high inherent variance of that operation at this scale. The FTS index adds no read-path cost at any dataset size.
+
+### Writes: overhead ratio holds constant
+
+| Op | sqlite (Go) | sqlite-fts (Go) | ratio | sqlite (Node) | sqlite-fts (Node) | ratio |
+|----|-------------|-----------------|-------|---------------|-------------------|-------|
+| create_entry | 0.04ms | 0.09ms | 2.25× | 0.03ms | 0.07ms | 2.3× |
+| create_version | 0.06ms | 0.12ms | 2× | 0.05ms | 0.10ms | 2× |
+
+The 2–3× write overhead observed at 10k is unchanged at 1M. The FTS B-tree write cost scales the same way as the main B-tree write cost — logarithmically — so the ratio between them stays flat. Adding FTS to a 1M-entry database costs the same relative write penalty as at 10k. Absolute latency is still sub-millisecond at the median for both backends.
+
+### FTS search: the 1M reality
+
+`fts_search` at 1M is a different workload than at 10k:
+
+| | 10k | 1M | factor |
+|---|---|---|---|
+| Go median | 0.16ms | 5.46ms | 34× |
+| Node median | 0.09ms | 3.51ms | 39× |
+| Go P95 | 0.24ms | 60.0ms | 250× |
+| Node P95 | 0.19ms | 8.43ms | 44× |
+| matches per query | ~40 | ~4000 | 100× |
+
+The median grows ~34–39×, while the match count grows ~100×. This means the FTS index is doing better than linear — returning 100 ranked results from 4000 matches is not 100× slower than returning them from 40 matches, because the FTS5 BM25 ranking algorithm and early termination optimize the common case. The per-entry cost confirms this: 0.05ms/entry (Go) and 0.04ms/entry (Node) at 1M vs sub-microsecond at 10k. The cost per returned entry grew, but not catastrophically.
+
+The P95 tail tells a different story: 60ms in Go and 8ms in Node. These spikes correspond to queries that hit phrases with the highest match density — where the FTS ranking scan must evaluate more candidate rows before it can confidently emit the top 100. The Go `fts_search` P95/P99 (60–63ms) is notably worse than Node (8–49ms), reflecting cgo boundary overhead on the result iteration loop for large result sets. `better-sqlite3`'s tight C++ binding returns all rows in a single native call; Go's `database/sql` crosses the cgo boundary once per row scan.
+
+The Go `fts_search` sampler needed only 600 samples to converge because the median is stable (most queries hit the same 5ms band); the Node sampler needed 1000 and still showed `6.3%!` because the bimodal distribution (fast queries vs occasional 49ms spikes) keeps the CI slightly wide.
+
+### Per-entry normalization: what the `fts_search_per_entry` row reveals
+
+The same per-entry normalization applied to `read_day` was applied to `fts_search` from the start — the op returns `(elapsed, numResults, ok)` and the runner computes per-result timings automatically. This is the critical lens for understanding FTS at scale.
+
+| | 10k | 1M | factor |
+|---|---|---|---|
+| `fts_search_per_entry` Go | <0.001ms | 0.05ms | ~50× |
+| `fts_search_per_entry` Node | <0.001ms | 0.04ms | ~40× |
+| `read_day_per_entry` Go | 0.01ms | 0.01ms | 1× |
+| `read_day_per_entry` Node | 0.00ms | 0.01ms | 1× |
+
+**`read_day_per_entry` is scale-invariant; `fts_search_per_entry` is not.** Day-scan per-entry stays at 0.01ms from 10k to 1M because SQLite does sequential page reads — once the scan is positioned, each additional row is a buffer increment. FTS search does BM25 ranking work per candidate, and the number of candidates grows with dataset size (~40 at 10k, ~4000 at 1M). Even though only 100 results are returned, the ranker must score all candidates to find the top 100. The per-result cost at 1M (0.04–0.05ms) reflects this scoring overhead amortized across the 100 returned entries.
+
+**`fts_search_per_entry` vs `read_random` at 1M.** An FTS query returning 100 IDs at 0.05ms/result is significantly cheaper than 100 individual `read_random` calls at 0.02ms each (2ms total for the IDs alone, plus fetching content separately). The FTS index is doing real work — ranking across thousands of candidates — for less than the cost of re-accessing those entries individually. This is the correct usage pattern: run `fts_search` to get ranked IDs, then `read_random` for the entries you actually want to display.
+
+### Comparing `read_day` to `fts_search` at 1M
+
+| Op | Entries accessed | Content returned | Go median | Node median |
+|---|---|---|---|---|
+| `read_day` | ~1370 (sequential scan) | full content, all entries | 15.63ms | 12.34ms |
+| `fts_search` | ~4000 candidates scored, 100 ranked IDs returned | entry_id only | 5.46ms | 3.51ms |
+
+FTS search is faster than a day-scan despite touching more candidate entries because it returns only entry IDs — no content deserialization, no YAML parsing equivalent. A real workload fetching content for the top 10 FTS results (10 × 0.02ms `read_random`) would complete in ~5.5ms + 0.2ms = ~5.7ms total, still faster than a full day-scan. The combined FTS+lookup pattern scales well because you're selectively fetching a small subset of the matched entries.
+
+### Key Takeaway (FTS, 1M)
+
+The write overhead from FTS maintenance is constant — 2–3× penalty that does not grow with dataset size. The read overhead is zero. These conclusions hold from 10k to 1M.
+
+FTS search scales sub-linearly with returned results but the per-result cost grows with dataset size as the ranker scores more candidates. At 1M entries, median search is 3.5–5.5ms with a P95 tail of 8–60ms. The cgo-per-row boundary makes Go's tail significantly worse than Node's for large result sets — for a search-heavy production workload at 1M scale, `better-sqlite3` is the better runtime. The correct application pattern is `fts_search` → get IDs → selective `read_random` for content; this is cheaper than a full day-scan and scales to any result subset size.

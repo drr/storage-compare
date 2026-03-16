@@ -20,9 +20,11 @@ func main() {
 	readDay := flag.Int("read-day", 200, "minimum read_day operations")
 	createEntry := flag.Int("create-entry", 500, "minimum create_entry operations")
 	createVersion := flag.Int("create-version", 200, "minimum create_version operations")
+	ftsSearch := flag.Int("fts-search", 200, "minimum fts_search operations")
 	precision := flag.Float64("precision", 0.05, "target relative 95%% CI width for the median (e.g. 0.05 = 5%%)")
 	maxFactor := flag.Int("max-factor", 10, "max samples = min-N * max-factor")
 	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
+	fts := flag.Bool("fts", false, "also benchmark SQLite-FTS database at data/sqlite-fts/notes.db")
 	flag.Parse()
 
 	rng := rand.New(rand.NewSource(*seed))
@@ -44,7 +46,7 @@ func main() {
 	}
 
 	dbPath := filepath.Join(*dataDir, "sqlite", "notes.db")
-	fsRoot := filepath.Join(*dataDir, "fs")
+	ftsDPath := filepath.Join(*dataDir, "sqlite-fts", "notes.db")
 
 	sqliteDB, err := backend.OpenSQLite(dbPath)
 	if err != nil {
@@ -52,9 +54,22 @@ func main() {
 	}
 	defer sqliteDB.Close()
 
-	fsDB, err := backend.OpenFS(fsRoot)
-	if err != nil {
-		log.Fatalf("open fs: %v", err)
+	var ftsDB *backend.SQLiteFTSBackend
+	if *fts {
+		ftsDB, err = backend.OpenSQLiteFTS(ftsDPath)
+		if err != nil {
+			log.Fatalf("open sqlite-fts: %v", err)
+		}
+		defer ftsDB.Close()
+	}
+
+	var fsDB *backend.FSBackend
+	if !*fts {
+		fsRoot := filepath.Join(*dataDir, "fs")
+		fsDB, err = backend.OpenFS(fsRoot)
+		if err != nil {
+			log.Fatalf("open fs: %v", err)
+		}
 	}
 
 	if err := os.MkdirAll(*resultsDir, 0755); err != nil {
@@ -79,11 +94,22 @@ func main() {
 	run("sqlite", "create_entry", *createEntry, bench.SQLiteCreateEntryOp(sqliteDB, rng))
 	run("sqlite", "create_version", *createVersion, bench.SQLiteCreateVersionOp(sqliteDB, idx, rng))
 
-	fmt.Println("=== Filesystem ===")
-	run("filesystem", "read_random", *readRandom, bench.FSReadRandomOp(fsDB, idx, rng))
-	run("filesystem", "read_day", *readDay, bench.FSReadDayOp(fsDB, dayPool, rng))
-	run("filesystem", "create_entry", *createEntry, bench.FSCreateEntryOp(fsDB, rng))
-	run("filesystem", "create_version", *createVersion, bench.FSCreateVersionOp(fsDB, idx, rng))
+	if fsDB != nil {
+		fmt.Println("=== Filesystem ===")
+		run("filesystem", "read_random", *readRandom, bench.FSReadRandomOp(fsDB, idx, rng))
+		run("filesystem", "read_day", *readDay, bench.FSReadDayOp(fsDB, dayPool, rng))
+		run("filesystem", "create_entry", *createEntry, bench.FSCreateEntryOp(fsDB, rng))
+		run("filesystem", "create_version", *createVersion, bench.FSCreateVersionOp(fsDB, idx, rng))
+	}
+
+	if ftsDB != nil {
+		fmt.Println("=== SQLite-FTS ===")
+		run("sqlite-fts", "read_random", *readRandom, bench.SQLiteReadRandomOp(ftsDB.SQLiteBackend, idx, rng))
+		run("sqlite-fts", "read_day", *readDay, bench.SQLiteReadDayOp(ftsDB.SQLiteBackend, dayPool, rng))
+		run("sqlite-fts", "create_entry", *createEntry, bench.SQLiteCreateEntryOp(ftsDB.SQLiteBackend, rng))
+		run("sqlite-fts", "create_version", *createVersion, bench.SQLiteCreateVersionOp(ftsDB.SQLiteBackend, idx, rng))
+		run("sqlite-fts", "fts_search", *ftsSearch, bench.SQLiteFTSSearchOp(ftsDB, rng))
+	}
 
 	fmt.Println()
 	bench.PrintTable(results, len(idx))

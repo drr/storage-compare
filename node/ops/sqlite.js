@@ -93,4 +93,48 @@ function createVersionOp(db, index, rng) {
   };
 }
 
-module.exports = { readRandomOp, readDayOp, createEntryOp, createVersionOp };
+// tagPhrases mirrors Go's wordgen.TagPhrases — used for FTS5 benchmarking.
+const tagPhrases = [
+  'meeting notes',
+  'action items',
+  'deployment plan',
+  'sprint planning',
+  'technical debt',
+  'code review',
+  'release notes',
+  'bug report',
+  'feature request',
+  'architecture decision',
+  'performance review',
+  'project kickoff',
+  'status update',
+  'retrospective notes',
+  'quarterly goals',
+  'incident report',
+  'design review',
+  'onboarding checklist',
+  'team sync',
+  'product roadmap',
+  'security audit',
+  'capacity planning',
+  'risk assessment',
+  'knowledge transfer',
+  'post mortem',
+];
+
+// Returns an Op: () => { ns: BigInt, count: number }
+// count is the number of matching FTS rows (enables per-result normalization).
+function ftsSearchOp(db, rng) {
+  const stmt = db.prepare(
+    'SELECT entry_id FROM entries_fts WHERE entries_fts MATCH ? ORDER BY rank LIMIT 100'
+  );
+  return () => {
+    const phrase = tagPhrases[Math.floor(rng() * tagPhrases.length)];
+    const t0 = process.hrtime.bigint();
+    const rows = stmt.all(phrase);
+    const ns = process.hrtime.bigint() - t0;
+    return { ns, count: Math.max(1, rows.length) };
+  };
+}
+
+module.exports = { readRandomOp, readDayOp, createEntryOp, createVersionOp, ftsSearchOp, tagPhrases };
