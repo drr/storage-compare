@@ -61,13 +61,30 @@ The benchmark uses adaptive sampling — each operation runs until the 95% confi
 
 **The right application pattern is FTS search → selective content fetch.** `fts_search` at 1M returns 100 ranked IDs in 5.5ms. Following up with 10 `read_random` calls for the entries you want to display adds ~0.2ms. Total: ~5.7ms — faster than a full `read_day` at 15ms and far cheaper than fetching all matching content. Never follow an FTS query with a full content fetch of all results.
 
-**Go's cgo boundary hurts FTS tail latency.** `fts_search` P95 at 1M: Go 60ms, Node 8ms. Go's `database/sql` crosses the cgo boundary once per row during result iteration; `better-sqlite3` returns all rows in a single native call. For a search-heavy workload at 1M scale, Node is the better runtime.
+**Go's `database/sql` boundary hurts FTS tail latency.** `fts_search` P95 at 1M: Go 60ms, Node 8ms. Go's `database/sql` crosses a language boundary once per row during result iteration; `better-sqlite3` returns all rows in a single native call. For a search-heavy workload at 1M scale, Node is the better runtime.
+
+### Go SQLite Drivers
+
+Three Go SQLite drivers were compared in a controlled experiment (Latin square warm + purge-before-each cold, 1M FTS dataset, 12 total runs):
+
+| Driver | Mechanism | Warm `read_random` | `fts_search` |
+|--------|-----------|-------------------|--------------|
+| `mattn/go-sqlite3` | CGO | **0.02ms / 51k/s** | **5.3ms** |
+| `modernc.org/sqlite` | Pure Go (transpiled C) | 0.03ms / 32k/s | 9.6ms |
+| `ncruces/go-sqlite3` | WASM (wazero) | 0.03ms / 32k/s | 11.7ms |
+| Node `better-sqlite3` | C++ V8 extension | 0.01ms / 73k/s | 3.5ms |
+
+**At cold cache all three Go drivers converge** — point lookup cost is dominated by page faults (0.56–0.67ms each) and driver dispatch is negligible. **At warm cache, mattn leads**: CGO overhead at this query scale is smaller than the per-call overhead of ccgo transpilation (modernc) or wazero WASM dispatch (ncruces). Switching away from CGO does not improve performance; it slightly degrades it.
+
+The Go vs Node gap is not a CGO problem. `better-sqlite3` has no language boundary during query execution — JS calls directly into C++ which calls SQLite and returns results without crossing a managed runtime boundary. This is an architectural property of the interface, not the driver, and cannot be closed by switching Go drivers.
+
+See [`docs/GO_SQLITE_DRIVERS.md`](docs/GO_SQLITE_DRIVERS.md) for the full experimental design and analysis.
 
 ## Recommendation
 
 **SQLite is the clear choice for any write-to-read ratio.** The day-range read advantage is structural and grows with dataset size. If full-text search is needed, add FTS5 — the read path is unaffected and the write overhead is constant and sub-millisecond at any tested scale. The filesystem offers plain `.md` portability and no SQLite dependency, but at the cost of meaningful and worsening performance as the dataset grows.
 
-For search-heavy deployments at 1M+ entries, use Node's `better-sqlite3` to avoid the Go cgo tail-latency problem on large FTS result sets.
+For search-heavy deployments at 1M+ entries, use Node's `better-sqlite3` to avoid the Go `database/sql` tail-latency problem on large FTS result sets. Among Go drivers, stick with `mattn/go-sqlite3`.
 
 ## Structure
 
@@ -82,5 +99,5 @@ Makefile     all targets (setup, generate, bench-*)
 
 ## Dependencies
 
-- **Go** — `github.com/mattn/go-sqlite3` (built with `-tags sqlite_fts5` for FTS targets), `github.com/google/uuid`
+- **Go** — `github.com/mattn/go-sqlite3` (default; `-tags sqlite_fts5` for FTS), `modernc.org/sqlite` (`-tags modernc`), `github.com/ncruces/go-sqlite3` (`-tags ncruces`), `github.com/google/uuid`
 - **Node** (v24.14.0 via nvm) — `better-sqlite3`, `gray-matter`, `uuid`

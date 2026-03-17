@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-
 	"storage-compare/internal/model"
 )
 
@@ -42,7 +40,7 @@ func OpenSQLite(dbPath string) (*SQLiteBackend, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on")
+	db, err := sql.Open(sqliteDriverName, sqliteDSN(dbPath))
 	if err != nil {
 		return nil, err
 	}
