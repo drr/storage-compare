@@ -17,9 +17,13 @@ SEED         ?= 0
 GO_BIN      := $(shell command -v go 2>/dev/null)
 GO_GENERATE := $(DATA_DIR)/.generate.stamp
 
-# Resolve node/npm from the pinned nvm version (.nvmrc = 22.15.0).
+# Derive the pinned Node version from .nvmrc (single source of truth).
+# To upgrade Node: update .nvmrc and engines.node in node/package.json.
+# Prepend the pinned node's bin dir to PATH when invoking npm so that
+# npm's #!/usr/bin/env node shebang resolves to the correct version,
+# ensuring native addons (e.g. better-sqlite3) compile for the right ABI.
 # Falls back to whatever is on PATH if nvm isn't present.
-NODE_VERSION := 24.14.0
+NODE_VERSION := $(shell cat .nvmrc)
 NVM_NODE     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/node
 NVM_NPM      := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/npm
 NODE         := $(if $(wildcard $(NVM_NODE)),$(NVM_NODE),node)
@@ -31,7 +35,7 @@ setup: check-go
 	@echo "==> Installing Go dependencies..."
 	cd go && go mod download
 	@echo "==> Installing Node.js dependencies (node $(NODE_VERSION))..."
-	cd node && $(NPM) ci
+	cd node && PATH=$(dir $(NODE)):$$PATH $(NPM) ci
 	@echo "==> Setup complete."
 
 check-go:
