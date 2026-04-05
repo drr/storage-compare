@@ -50,7 +50,7 @@ generate: check-go
 	  --data-dir ../$(DATA_DIR) \
 	  $(if $(filter-out 0,$(SEED)),--seed $(SEED),)
 	@touch $(GO_GENERATE)
-	@echo "==> Generation complete."
+	@echo "==> Generation complete (SQLite + index.json)."
 
 generate-scale: check-go
 	@echo "==> Generating $(COUNT) entries (scale test)..."
@@ -75,7 +75,7 @@ generate-fts: check-go
 	  $(if $(filter-out 0,$(SEED)),--seed $(SEED),) \
 	  --fts
 	@touch $(GO_GENERATE)
-	@echo "==> FTS generation complete."
+	@echo "==> FTS generation complete (SQLite + SQLite-FTS + index.json)."
 
 # ─── Benchmarks ──────────────────────────────────────────────────────────────
 
@@ -257,8 +257,6 @@ results:
 verify:
 	@echo "==> Verifying SQLite latest count..."
 	@sqlite3 $(DATA_DIR)/sqlite/notes.db "SELECT COUNT(*) FROM entries WHERE is_latest=1;"
-	@echo "==> Checking for versioned FS files..."
-	@find $(DATA_DIR)/fs -name '*-v[0-9]*.md' | wc -l | xargs echo "Versioned files:"
 	@echo "==> Index entry count:"
 	@python3 -c "import json; print(len(json.load(open('$(DATA_DIR)/index.json'))))"
 	@if [ -f $(DATA_DIR)/sqlite-fts/notes.db ]; then \
@@ -269,7 +267,7 @@ verify:
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 clean-data:
-	rm -rf $(DATA_DIR)/sqlite $(DATA_DIR)/sqlite-fts $(DATA_DIR)/fs $(DATA_DIR)/index.json $(GO_GENERATE)
+	rm -rf $(DATA_DIR)/sqlite $(DATA_DIR)/sqlite-fts $(DATA_DIR)/index.json $(GO_GENERATE)
 
 clean: clean-data
 	rm -rf $(RESULTS_DIR) $(COLD_OUT)

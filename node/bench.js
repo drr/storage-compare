@@ -5,7 +5,6 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { loadIndex, buildDayPool, runAdaptive, printTable, saveCSV } = require('./runner');
 const sqliteOps = require('./ops/sqlite');
-const fsOps = require('./ops/fs');
 
 const args = process.argv.slice(2);
 function getArg(name, def) {
@@ -63,15 +62,6 @@ run('sqlite', 'read_random',    READ_RANDOM,    sqliteOps.readRandomOp(db, index
 run('sqlite', 'read_day',       READ_DAY,       sqliteOps.readDayOp(db, dayPool, rng));
 run('sqlite', 'create_entry',   CREATE_ENTRY,   sqliteOps.createEntryOp(db, rng));
 run('sqlite', 'create_version', CREATE_VERSION, sqliteOps.createVersionOp(db, index, rng));
-
-if (!FTS) {
-  const fsRoot = path.join(dataDir, 'fs');
-  console.log('=== Filesystem ===');
-  run('filesystem', 'read_random',    READ_RANDOM,    fsOps.readRandomOp(fsRoot, index, rng));
-  run('filesystem', 'read_day',       READ_DAY,       fsOps.readDayOp(fsRoot, dayPool, rng));
-  run('filesystem', 'create_entry',   CREATE_ENTRY,   fsOps.createEntryOp(fsRoot, rng));
-  run('filesystem', 'create_version', CREATE_VERSION, fsOps.createVersionOp(fsRoot, index, rng));
-}
 
 if (FTS) {
   const ftsDb = new Database(path.join(dataDir, 'sqlite-fts', 'notes.db'));

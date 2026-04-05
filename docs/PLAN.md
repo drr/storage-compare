@@ -1,8 +1,8 @@
-# Storage Benchmark: SQLite vs Filesystem
+# Storage Benchmark: SQLite
 
 ## Context
 
-Evaluating read and search performance characteristics between a single SQLite database file and a directory tree of individual markdown files, for a time-stream oriented daily note-taking app. The benchmark will help decide the storage backend. Write performance is not a concern; the focus is cold-cache random reads, day-range reads, and insertion latency (new entries and new versions).
+Evaluating read and search performance characteristics of SQLite (with and without FTS5) as the storage backend for a time-stream oriented daily note-taking app. The focus is cold-cache random reads, day-range reads, insertion latency (new entries and new versions), and full-text search.
 
 ---
 
@@ -15,10 +15,7 @@ Evaluating read and search performance characteristics between a single SQLite d
 ├── data/
 │   ├── index.json           # generated; [{id, day, version_count}] for all entries
 │   ├── sqlite/notes.db      # generated; gitignored
-│   └── fs/YYYY/YYYY-MM/YYYY-MM-DD/
-│       ├── YYYY-MM-DD-{GUID}.md          # latest version (no suffix)
-│       ├── YYYY-MM-DD-{GUID}-v1.md       # archived version (only exists if updated)
-│       └── YYYY-MM-DD-{GUID}-v2.md       # ...
+│   └── sqlite-fts/notes.db  # generated (FTS mode only); gitignored
 ├── go/
 │   ├── go.mod
 │   ├── cmd/
@@ -28,16 +25,15 @@ Evaluating read and search performance characteristics between a single SQLite d
 │       ├── model/entry.go
 │       ├── wordgen/wordgen.go
 │       ├── backend/sqlite.go
-│       ├── backend/filesystem.go
+│       ├── backend/sqlite_fts.go
 │       ├── bench/runner.go
 │       ├── bench/ops_sqlite.go
-│       ├── bench/ops_fs.go
+│       ├── bench/ops_sqlite_fts.go
 │       └── bench/cache_darwin.go + cache_other.go
 ├── node/
 │   ├── package.json
 │   ├── bench.js
 │   ├── ops/sqlite.js
-│   ├── ops/fs.js
 │   └── runner.js
 ├── results/                 # gitignored
 └── docs/PLAN.md
@@ -104,21 +100,6 @@ CREATE INDEX idx_latest_by_day ON entries(modify_time) WHERE is_latest = 1;
 
 ---
 
-## Filesystem Format
-
-Directory path uses **creation date** (constant across versions):
-`./data/fs/YYYY/YYYY-MM/YYYY-MM-DD/`
-
-**Latest version filename** (no version suffix):
-`YYYY-MM-DD-{GUID}.md`
-
-**Older versions** (renamed when a new version is written):
-`YYYY-MM-DD-{GUID}-v1.md`, `YYYY-MM-DD-{GUID}-v2.md`, ...
-
-File content: YAML frontmatter + markdown body. No `is_latest` field — implicit from absence of version suffix.
-
----
-
 ## Benchmark Run Design
 
 Each run starts with a single `sudo purge` (cold-cache) or no purge (warm). Per-operation latency is recorded for every operation; stats computed at the end.
@@ -140,12 +121,12 @@ Each run starts with a single `sudo purge` (cold-cache) or no purge (warm). Per-
 
 **Operations:**
 
-| Op | SQLite | Filesystem |
-|----|--------|------------|
-| `read_random` | `SELECT * WHERE id=? AND is_latest=1` | open + parse frontmatter of `GUID.md` |
-| `read_day` | `SELECT * WHERE modify_time in [day] AND is_latest=1` | `ReadDir`, filter unversioned, read each |
-| `create_entry` | `INSERT` | mkdir-p if needed + write `GUID.md` |
-| `create_version` | txn: `UPDATE is_latest=0`, `INSERT` new row | `rename` to `-vN.md` + write new `GUID.md` |
+| Op | SQLite |
+|----|--------|
+| `read_random` | `SELECT * WHERE id=? AND is_latest=1` |
+| `read_day` | `SELECT * WHERE modify_time in [day] AND is_latest=1` |
+| `create_entry` | `INSERT` |
+| `create_version` | txn: `UPDATE is_latest=0`, `INSERT` new row |
 
 **Output:** ASCII summary table + `results/{lang}/{backend}_{op}_timings.csv` (one ns value per line).
 
@@ -212,7 +193,8 @@ filesystem | read_day        |  2000 |  5.2%! |  0.17ms |  0.35ms | ...  ← did
 
 ```
 setup             # go mod download + npm ci
-generate          # 10k entries, both backends
+generate          # 10k entries (SQLite + index.json)
+generate-fts      # 10k entries (SQLite + SQLite-FTS + index.json)
 generate-scale    # make generate-scale COUNT=1000000
 generate-append   # make generate-append COUNT=5000
 bench-cold        # sudo purge + bench-all
@@ -220,8 +202,9 @@ bench-warm        # bench-all without purge
 bench-go          # go benchmark only
 bench-node        # node benchmark only
 bench-all         # go + node
+bench-fts         # FTS benchmark (go + node)
 verify            # sanity checks on generated data
-clean-data        # rm data/sqlite data/fs index.json
+clean-data        # rm data/sqlite data/sqlite-fts index.json
 clean             # clean-data + results
 ```
 
@@ -229,7 +212,7 @@ clean             # clean-data + results
 
 ## Dependencies
 
-- **Go:** `github.com/google/uuid`, `github.com/mattn/go-sqlite3`, `gopkg.in/yaml.v3`
-- **Node:** `better-sqlite3` (sync API, no event-loop noise), `gray-matter`, `uuid`
+- **Go:** `github.com/google/uuid`, `github.com/mattn/go-sqlite3`
+- **Node:** `better-sqlite3` (sync API, no event-loop noise), `uuid`
 - **System:** `sqlite3` CLI (for `verify` target only), `python3` (for `verify` target only)
 - **Homebrew:** `go` only

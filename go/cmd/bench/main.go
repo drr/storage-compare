@@ -63,15 +63,6 @@ func main() {
 		defer ftsDB.Close()
 	}
 
-	var fsDB *backend.FSBackend
-	if !*fts {
-		fsRoot := filepath.Join(*dataDir, "fs")
-		fsDB, err = backend.OpenFS(fsRoot)
-		if err != nil {
-			log.Fatalf("open fs: %v", err)
-		}
-	}
-
 	if err := os.MkdirAll(*resultsDir, 0755); err != nil {
 		log.Fatalf("create results dir: %v", err)
 	}
@@ -93,14 +84,6 @@ func main() {
 	run("sqlite", "read_day", *readDay, bench.SQLiteReadDayOp(sqliteDB, dayPool, rng))
 	run("sqlite", "create_entry", *createEntry, bench.SQLiteCreateEntryOp(sqliteDB, rng))
 	run("sqlite", "create_version", *createVersion, bench.SQLiteCreateVersionOp(sqliteDB, idx, rng))
-
-	if fsDB != nil {
-		fmt.Println("=== Filesystem ===")
-		run("filesystem", "read_random", *readRandom, bench.FSReadRandomOp(fsDB, idx, rng))
-		run("filesystem", "read_day", *readDay, bench.FSReadDayOp(fsDB, dayPool, rng))
-		run("filesystem", "create_entry", *createEntry, bench.FSCreateEntryOp(fsDB, rng))
-		run("filesystem", "create_version", *createVersion, bench.FSCreateVersionOp(fsDB, idx, rng))
-	}
 
 	if ftsDB != nil {
 		fmt.Println("=== SQLite-FTS ===")

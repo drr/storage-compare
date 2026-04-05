@@ -55,15 +55,6 @@ func main() {
 		defer ftsDB.Close()
 	}
 
-	var fsDB *backend.FSBackend
-	if !*fts {
-		fsRoot := filepath.Join(*dataDir, "fs")
-		fsDB, err = backend.OpenFS(fsRoot)
-		if err != nil {
-			log.Fatalf("open fs: %v", err)
-		}
-	}
-
 	// Determine time range
 	var startTime time.Time
 	if *appendMode {
@@ -123,7 +114,7 @@ func main() {
 
 	// Write to backends in parallel
 	var wg sync.WaitGroup
-	var sqliteErr, ftsErr, fsErr error
+	var sqliteErr, ftsErr error
 
 	wg.Add(1)
 	go func() {
@@ -147,15 +138,6 @@ func main() {
 		}()
 	}
 
-	if fsDB != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			log.Printf("Writing %d entries to filesystem...", len(entries))
-			fsErr = fsDB.BulkWrite(entries)
-		}()
-	}
-
 	wg.Wait()
 
 	if sqliteErr != nil {
@@ -163,9 +145,6 @@ func main() {
 	}
 	if ftsErr != nil {
 		log.Fatalf("sqlite-fts write: %v", ftsErr)
-	}
-	if fsErr != nil {
-		log.Fatalf("fs write: %v", fsErr)
 	}
 
 	// Update index.json

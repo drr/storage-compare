@@ -1,6 +1,6 @@
 # storage-compare
 
-Benchmarks SQLite vs a filesystem tree of markdown files as storage backends for a time-stream note-taking app, with an optional SQLite FTS5 variant for full-text search. Measures four core operations (single-entry read, day-range read, create entry, create version) plus FTS search in Go and Node.js across 10k and 1M entry datasets under warm and cold cache conditions.
+Benchmarks SQLite as a storage backend for a time-stream note-taking app, with an optional SQLite FTS5 variant for full-text search. Measures four core operations (single-entry read, day-range read, create entry, create version) plus FTS search in Go and Node.js across 10k and 1M entry datasets under warm and cold cache conditions.
 
 See [`docs/RESULTS.md`](docs/RESULTS.md) for full tables and analysis.
 
@@ -8,7 +8,7 @@ See [`docs/RESULTS.md`](docs/RESULTS.md) for full tables and analysis.
 
 ```sh
 make setup       # install Go and Node dependencies
-make generate    # generate 10k entries (SQLite + filesystem)
+make generate    # generate 10k entries (SQLite)
 make bench-warm  # benchmark (no cache purge)
 make bench-cold  # sudo purge + benchmark, results written to cold-results.txt
 ```
@@ -16,40 +16,22 @@ make bench-cold  # sudo purge + benchmark, results written to cold-results.txt
 ### FTS Mode
 
 ```sh
-make generate-fts          # generate 10k entries (SQLite + SQLite-FTS, no filesystem)
+make generate-fts          # generate 10k entries (SQLite + SQLite-FTS)
 make bench-fts             # benchmark SQLite vs SQLite-FTS (warm)
 make bench-cold-fts        # sudo purge + FTS benchmark
 
 make generate-fts COUNT=1000000  # 1M scale
 ```
 
-FTS mode skips the filesystem backend entirely — no markdown file tree is written. This matters at 1M entries where creating ~1M `.md` files across 730 directories would be expensive and unnecessary for the FTS comparison.
-
-## What Was Compared
+## What Was Benchmarked
 
 **SQLite** stores all entries in a single WAL-mode database with `WITHOUT ROWID` tables and partial indexes on `is_latest`. A single range scan returns a full day's entries.
-
-**Filesystem** uses a `YYYY/YYYY-MM/YYYY-MM-DD/` directory tree. The latest version has no suffix; older versions are archived as `GUID-v1.md`, `GUID-v2.md`, etc. Every read requires individual file opens.
 
 **SQLite-FTS** (FTS mode only) adds an FTS5 virtual table (`porter unicode61` tokenizer) alongside the regular `entries` table. An `AFTER INSERT` trigger keeps the full-text index in sync automatically. 10% of generated entries have a searchable phrase embedded; `fts_search` queries pick a random phrase and return the top 100 ranked results.
 
 The benchmark uses adaptive sampling — each operation runs until the 95% confidence interval for the median is within 5% relative width, making sample counts self-tuning rather than fixed. Multi-entry operations (`read_day`, `fts_search`) track both total latency and per-entry normalized latency in the output table.
 
 ## Key Findings
-
-### SQLite vs Filesystem
-
-**Single-entry reads are tied warm, SQLite wins cold.** At 10k warm, both return a single entry in ~0.02ms. Cold cache breaks the tie: SQLite's small working set re-faults quickly while each filesystem file open requires separate inode and data page faults — 4–5× slower cold.
-
-**Day-range reads favor SQLite at every scale and temperature.** At 10k warm: SQLite 3–4× faster (0.09ms vs 0.32ms Go). At 1M warm: 16× faster (17ms vs 251ms). SQLite issues one indexed range scan and reads rows off sequential B-tree pages. The filesystem must `readdir`, filter filenames, then open and parse every file independently — N separate I/O operations with no amortization.
-
-**Per-entry normalization exposes the deepest structural difference.** Day-scan cost per entry in SQLite at 1M cold: 0.01ms. Standalone random read: 0.61ms. That's **60–77× cheaper per entry** inside a range scan — SQLite pays the B-tree traversal once then reads sequentially. Filesystem day-scan per entry (0.16ms) is only 1.4–1.7× cheaper than a random read (0.27ms) because every file open is an independent I/O regardless of access pattern.
-
-**At 1M entries, warm and cold become indistinguishable.** The dataset is too large for the OS buffer cache to stay meaningful across hundreds of benchmark samples. Cache temperature only matters at small dataset sizes.
-
-**Writes are comparable, SQLite ~2× faster.** Both backends write new entries in 30–70µs median. Write tails (P99) are dominated by WAL checkpoints on the SQLite side and occasional directory creation on the filesystem side.
-
-**Directory density degrades the filesystem at scale.** At 1M entries, each day-directory holds ~1370 files vs ~14 at 10k. `readdir`, inode lookup, and directory scans all get proportionally more expensive — per-entry filesystem costs increase ~8× from 10k to 1M even in the warm case.
 
 ### SQLite vs SQLite-FTS5
 
@@ -82,7 +64,7 @@ See [`docs/GO_SQLITE_DRIVERS.md`](docs/GO_SQLITE_DRIVERS.md) for the full experi
 
 ## Recommendation
 
-**SQLite is the clear choice for any write-to-read ratio.** The day-range read advantage is structural and grows with dataset size. If full-text search is needed, add FTS5 — the read path is unaffected and the write overhead is constant and sub-millisecond at any tested scale. The filesystem offers plain `.md` portability and no SQLite dependency, but at the cost of meaningful and worsening performance as the dataset grows.
+**SQLite with FTS5 is the right choice.** The read path is unaffected by adding FTS5, and the write overhead is constant and sub-millisecond at any tested scale.
 
 For search-heavy deployments at 1M+ entries, use Node's `better-sqlite3` to avoid the Go `database/sql` tail-latency problem on large FTS result sets. Among Go drivers, stick with `mattn/go-sqlite3`.
 
@@ -100,4 +82,4 @@ Makefile     all targets (setup, generate, bench-*)
 ## Dependencies
 
 - **Go** — `github.com/mattn/go-sqlite3` (default; `-tags sqlite_fts5` for FTS), `modernc.org/sqlite` (`-tags modernc`), `github.com/ncruces/go-sqlite3` (`-tags ncruces`), `github.com/google/uuid`
-- **Node** (v24.14.0 via nvm) — `better-sqlite3`, `gray-matter`, `uuid`
+- **Node** (v24.14.0 via nvm) — `better-sqlite3`, `uuid`
