@@ -7,11 +7,14 @@
     "bench": "node bench.js"
   },
   "engines": {
-    "node": "24.14.1",
-    "npm": ">=10"
+    "node": "26.13.0",
+    "npm": ">=11.20"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
     "uuid": "^9.0.1"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.8.0": true
   }
 }

@@ -137,7 +137,7 @@ By default the URL requires a Bearer token (`Authorization: Bearer $SPRITE_API_T
 
 **Node.js** — the sprite ships with Node v22 at `/.sprite/bin/node`. To install a different version without nvm (nvm installs can timeout over slow connections):
 ```bash
-curl -fsSL https://nodejs.org/dist/v24.14.0/node-v24.14.0-linux-x64.tar.xz \
+curl -fsSL https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz \
   | tar -C /usr/local -xJ --strip-components=1
 ```
 Then force `/usr/local/bin` first in PATH (see PATH section above).

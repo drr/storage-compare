@@ -5,7 +5,7 @@
         bench-go-mattn-fts bench-go-modernc-fts bench-go-ncruces-fts \
         bench-driver-seq-abc bench-driver-seq-bca bench-driver-seq-cab \
         bench-driver-warm bench-driver-cold \
-        results clean-data clean check-go verify
+        results clean-data clean check-go check-node verify
 
 DATA_DIR     ?= ./data
 RESULTS_DIR  ?= ./results
@@ -22,21 +22,34 @@ GO_GENERATE := $(DATA_DIR)/.generate.stamp
 # Prepend the pinned node's bin dir to PATH when invoking npm so that
 # npm's #!/usr/bin/env node shebang resolves to the correct version,
 # ensuring native addons (e.g. better-sqlite3) compile for the right ABI.
-# Falls back to whatever is on PATH if nvm isn't present.
+# Never falls back to node from PATH: check-node fails instead.
 NODE_VERSION := $(shell cat .nvmrc)
-NVM_NODE     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/node
-NVM_NPM      := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/npm
-NODE         := $(if $(wildcard $(NVM_NODE)),$(NVM_NODE),node)
-NPM          := $(if $(wildcard $(NVM_NPM)),$(NVM_NPM),npm)
+NODE         := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/node
+NPM          := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin/npm
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
 
-setup: check-go
+# Install scripts: node/.npmrc sets strict-allow-scripts, so only the packages approved in
+# node/package.json allowScripts (better-sqlite3, which compiles its addon) may run one;
+# any other fails the install. After bumping better-sqlite3, review and re-approve:
+#   cd node && PATH=$(dir $(NODE)):$$PATH $(NPM) install-scripts approve better-sqlite3
+setup: check-go check-node
 	@echo "==> Installing Go dependencies..."
 	cd go && go mod download
 	@echo "==> Installing Node.js dependencies (node $(NODE_VERSION))..."
 	cd node && PATH=$(dir $(NODE)):$$PATH $(NPM) ci
 	@echo "==> Setup complete."
+
+# The pin must be at or above the first release of its line with the October 2026 security fixes (Node2Shell
+# CVE-2026-111497, the eMudhra CA distrust); lines below 22 and odd lines are EOL. Lines after 26 postdate the fixes.
+check-node:
+	@case "$(NODE_VERSION)" in 22.*) f=22.23.4;; 24.*) f=24.22.1;; 26.*) f=26.12.1;; *) f=;; esac; \
+	m="$(NODE_VERSION)"; m=$${m%%.*}; \
+	if [ -z "$$f" ] && [ "$$m" -le 26 ]; then echo "ERROR: node $(NODE_VERSION) is an EOL line; pin a supported LTS"; exit 1; fi; \
+	if [ -n "$$f" ] && [ "$$(printf '%s\n' "$$f" "$(NODE_VERSION)" | sort -V | head -1)" != "$$f" ]; then \
+		echo "ERROR: node $(NODE_VERSION) predates the October 2026 security fixes; pin $$f or later"; exit 1; fi
+	@test -x "$(NODE)" || { echo "ERROR: node v$(NODE_VERSION) not installed; run: nvm install $(NODE_VERSION)"; exit 1; }
+	@v=$$("$(NODE)" --version); test "$$v" = "v$(NODE_VERSION)" || { echo "ERROR: expected v$(NODE_VERSION), got $$v"; exit 1; }
 
 check-go:
 	@if [ -z "$(GO_BIN)" ]; then \
@@ -114,7 +127,7 @@ bench-go: check-go
 	  --data-dir ../$(DATA_DIR) \
 	  --results-dir ../$(RESULTS_DIR)
 
-bench-node:
+bench-node: check-node
 	@echo "==> Running Node.js benchmark..."
 	@mkdir -p $(RESULTS_DIR)/node
 	cd node && $(NODE) bench.js \
@@ -129,7 +142,7 @@ bench-go-fts: check-go
 	  --results-dir ../$(RESULTS_DIR) \
 	  --fts
 
-bench-node-fts:
+bench-node-fts: check-node
 	@echo "==> Running Node.js FTS benchmark..."
 	@mkdir -p $(RESULTS_DIR)/node
 	cd node && $(NODE) bench.js \

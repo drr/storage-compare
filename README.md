@@ -82,4 +82,4 @@ Makefile     all targets (setup, generate, bench-*)
 ## Dependencies
 
 - **Go** — `github.com/mattn/go-sqlite3` (default; `-tags sqlite_fts5` for FTS), `modernc.org/sqlite` (`-tags modernc`), `github.com/ncruces/go-sqlite3` (`-tags ncruces`), `github.com/google/uuid`
-- **Node** (v24.14.0 via nvm) — `better-sqlite3`, `uuid`
+- **Node** (the version in `.nvmrc`, via nvm) — `better-sqlite3`, `uuid`
