@@ -51,12 +51,27 @@ check-node:
 	@test -x "$(NODE)" || { echo "ERROR: node v$(NODE_VERSION) not installed; run: nvm install $(NODE_VERSION)"; exit 1; }
 	@v=$$("$(NODE)" --version); test "$$v" = "v$(NODE_VERSION)" || { echo "ERROR: expected v$(NODE_VERSION), got $$v"; exit 1; }
 
+# Go must be at or above the first release of its line with the October 2026 security fixes (go1.27.3 / go1.26.10:
+# crypto/x509, crypto/tls, net/http); lines below 1.26 are EOL. Lines after the newest floor postdate the fixes.
+GO_FLOORS := 1.26.10 1.27.3
+
 check-go:
 	@if [ -z "$(GO_BIN)" ]; then \
 	  echo "ERROR: 'go' not found in PATH."; \
 	  echo "Install Go: brew install go   (or visit https://go.dev/dl/)"; \
 	  exit 1; \
 	fi
+	@v=$$($(GO_BIN) version | awk '{ print $$3 }'); v=$${v#go}; \
+	line=$$(echo "$$v" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/'); \
+	for f in $(GO_FLOORS); do \
+		if [ "$${f%.*}" = "$$line" ]; then \
+			[ "$$(printf '%s\n' "$$f" "$$v" | sort -V | head -1)" = "$$f" ] && exit 0; \
+			echo "ERROR: go$$v predates the October 2026 security fixes; need go$$f or later (brew upgrade go)"; exit 1; \
+		fi; \
+	done; \
+	newest=$$(printf '%s\n' $(GO_FLOORS) | sort -V | tail -1); \
+	[ "$$(printf '%s\n' "$$line" "$${newest%.*}" | sort -V | tail -1)" = "$$line" ] && exit 0; \
+	echo "ERROR: go$$v is an EOL line (supported: $(GO_FLOORS)); brew upgrade go"; exit 1
 
 # ─── Data Generation ─────────────────────────────────────────────────────────
 
